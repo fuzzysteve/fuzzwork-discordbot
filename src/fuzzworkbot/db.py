@@ -19,6 +19,13 @@ EMOJI_TYPE = String(64).with_variant(mysql.VARCHAR(64, charset="utf8mb4", collat
 MYSQL_TABLE_ARGS = {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_general_ci"}
 
 
+def now_utc() -> datetime.datetime:
+    """Naive datetime representing the current instant in UTC. Every DATETIME column
+    in this schema is naive and is always interpreted as UTC — never mix in
+    datetime.now() (server-local time) or other timezones."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -79,10 +86,28 @@ class Giveaway(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     starts_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     ends_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
-    winner_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    code_id: Mapped[int | None] = mapped_column(ForeignKey("giveaway_codes.id"), nullable=True)
+    winner_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # `winner_discord_id` and `code_id` columns still exist in MySQL (dropping them
+    # live was judged too risky to force through) but are unused now that a giveaway
+    # can have multiple winners — see GiveawayWinner instead. Do not resurrect them.
 
     prize: Mapped["Prize"] = relationship()
+
+
+class GiveawayWinner(Base):
+    __tablename__ = "giveaway_winners"
+    __table_args__ = MYSQL_TABLE_ARGS
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    giveaway_id: Mapped[int] = mapped_column(ForeignKey("giveaways.id"), nullable=False)
+    discord_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Null when the prize ran out of codes at draw time (shouldn't happen given
+    # creation-time capacity checks, but handled defensively) — the win is still
+    # recorded, just flagged for an admin to deliver a code manually.
+    code_id: Mapped[int | None] = mapped_column(ForeignKey("giveaway_codes.id"), nullable=True)
+    drawn_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+
+    giveaway: Mapped["Giveaway"] = relationship()
 
 
 class RoleReaction(Base):

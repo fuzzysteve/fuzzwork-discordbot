@@ -11,8 +11,12 @@ SQLAlchemy 2.0, MySQL, managed with [uv](https://docs.astral.sh/uv/).
   name. The actual EVE SSO + Discord OAuth login happens in a separate companion PHP
   app — see [EVE verification](#eve-verification) below.
 - **`/creategiveaway`** (and `giveaway-cli giveaway create`) — reaction giveaways drawn
-  from pre-loaded prize/code pools. React to the posted message; after the configured
-  duration, a random reactor is picked, DM'd their code, and announced publicly.
+  from pre-loaded prize/code pools, with one or more winners. The posted message states
+  the end time in UTC; React to enter. After the configured duration, that many random
+  reactors are picked, each DM'd their own code, and the winners announced publicly.
+  Creating a giveaway checks that enough codes actually exist for the requested winner
+  count — accounting for codes already promised to other still-running giveaways for
+  the same prize — so you can't over-promise a prize pool.
 - **Role reactions** — react to an existing message (e.g. in `#acl-management`) to gain
   a role; remove the reaction to lose it. Configured entirely via the CLI, no redeploy
   needed.
@@ -70,13 +74,17 @@ to MySQL directly, it does **not** go through the running bot process):
 
 ```bash
 uv run giveaway-cli prize add                       # interactive: name, description
-uv run giveaway-cli prize list
+uv run giveaway-cli prize list                       # shows unused / available / reserved counts
 
 uv run giveaway-cli codes load "PLEX x2"             # paste codes, blank line to finish
 uv run giveaway-cli codes load "PLEX x2" --file codes.txt
+uv run giveaway-cli codes import-csv export.csv      # bulk-import multiple prizes; needs
+                                                      # 'prize'/'code' header columns, order
+                                                      # doesn't matter, optional 'given' column
+uv run giveaway-cli codes list "PLEX x2"             # shows each code and who (if anyone) got it
 
-uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, channel
-uv run giveaway-cli giveaway list
+uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel
+uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
 
 uv run giveaway-cli role-menu add \
   --guild-id <id> --channel-id <id> --message-id <id> \
@@ -88,6 +96,23 @@ uv run giveaway-cli role-menu remove --message-id <id> --emoji "🛡️"
 Channel/message/role/guild IDs all come from Discord's right-click "Copy ID" menus
 (requires Developer Mode: User Settings → Advanced → Developer Mode).
 
+### Running it directly + bash completion
+
+`giveaway-cli` is a self-contained executable (its shebang points at the project's own
+venv Python), so it doesn't strictly need `uv run` — that's only there so it works
+before you've put anything on `PATH`. To run it as a bare `giveaway-cli` command (and to
+get tab-completion, which only hooks into the literal command name):
+
+```bash
+sudo ln -s /home/discordbot/.venv/bin/giveaway-cli /usr/local/bin/giveaway-cli
+echo 'eval "$(_GIVEAWAY_CLI_COMPLETE=bash_source giveaway-cli)"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+This completes command/subcommand names and flags (`giveaway-cli <TAB>`, `giveaway-cli
+role-menu <TAB>`, `--role-<TAB>`, ...). It does not complete dynamic values like actual
+prize names — that would need custom Click completion callbacks, not currently wired up.
+
 ## How giveaways work
 
 A `Giveaway` row moves through `pending → active → finished`. Both `/creategiveaway`
@@ -95,13 +120,37 @@ and `giveaway-cli giveaway create` just insert a `pending` row — a background 
 the bot (`cogs/giveaways.py`, runs every minute) is what actually posts the message and
 later closes it out:
 
-1. **Pending → active**: posts the giveaway embed to the channel, records the message
-   ID, sets `starts_at`/`ends_at`.
-2. **Active, past `ends_at`**: collects everyone who reacted, picks a random winner,
-   claims one unused code from that prize's pool, DMs the winner the code, and posts a
-   public winner announcement (without the code). If the DM fails (winner has DMs
-   closed) or the prize has run out of codes, it says so publicly and an admin needs to
-   deliver the code by hand.
+1. **Pending → active**: posts the giveaway embed to the channel — prize, winner count,
+   and the end time spelled out in UTC — records the message ID, sets `starts_at`/`ends_at`.
+2. **Active, past `ends_at`**: collects everyone who reacted, randomly draws up to
+   `winner_count` distinct reactors (fewer if there weren't enough entrants), and for
+   each winner claims one unused code from that prize's pool, DMs them their own code,
+   and records the win in `giveaway_winners`. Posts one public announcement listing all
+   winners (without codes). If a DM fails (winner has DMs closed) or the prize
+   unexpectedly runs out of codes, that winner's line says so and an admin needs to
+   deliver the code by hand — this shouldn't normally happen, since both `/creategiveaway`
+   and `giveaway-cli giveaway create` check capacity before ever creating the giveaway.
+
+All timestamps (`created_at`/`starts_at`/`ends_at`) are naive datetimes that are always
+UTC (`fuzzworkbot.db.now_utc()`) — never mix in server-local time here, the box this
+runs on is not UTC (`Europe/Berlin`).
+
+### Giveaway capacity checks
+
+Every `GiveawayCode` row for a prize is "unused" (`assigned_to_discord_id IS NULL`)
+until a giveaway finish claims it — but a `pending`/`active` giveaway has already
+*promised* `winner_count` of them before it finishes. `fuzzworkbot.giveaway_logic`
+tracks this:
+
+- `unused_code_count` — raw count of unclaimed codes for a prize.
+- `committed_winner_count` — sum of `winner_count` across every `pending`/`active`
+  giveaway for that prize (codes they'll need but haven't claimed yet).
+- `available_code_count` — `unused - committed`; this is the number actually safe to
+  promise to a *new* giveaway, and what both creation paths check against.
+
+Creating a giveaway locks the `Prize` row (`SELECT ... FOR UPDATE`) for the duration of
+that check-and-insert, so two admins creating giveaways for the same prize at the same
+moment can't both read the same "available" number and both succeed.
 
 ## EVE verification
 
@@ -130,7 +179,13 @@ member/reaction diff and hasn't been needed so far.
 - `userlookup(id, discordid, eveid)` — written by the PHP auth app, read by `/authme`.
 - `prizes(id, name, description, active, created_at)`
 - `giveaway_codes(id, prize_id, code, assigned_to_discord_id, assigned_at, created_at)`
-- `giveaways(id, prize_id, guild_id, channel_id, message_id, created_by_discord_id, duration_hours, status, created_at, starts_at, ends_at, winner_discord_id, code_id)`
+- `giveaways(id, prize_id, guild_id, channel_id, message_id, created_by_discord_id, duration_hours, status, created_at, starts_at, ends_at, winner_count)` —
+  also still has unused `winner_discord_id`/`code_id` columns left over from the
+  single-winner design (see `db.py`'s comment; dropping them live was judged too risky
+  to force through, they're just dead columns now, don't resurrect them)
+- `giveaway_winners(id, giveaway_id, discord_id, code_id, drawn_at)` — one row per
+  winner per giveaway; `code_id` is null only in the (shouldn't-happen) case where the
+  prize ran out of codes at draw time
 - `role_reactions(id, guild_id, channel_id, message_id, emoji, role_id, created_at)`
 
 ## Security
@@ -150,3 +205,7 @@ member/reaction diff and hasn't been needed so far.
   hierarchy or missing-permission issue (see Requirements above).
 - **Giveaway not posting**: the poller runs once a minute, so allow up to ~60s; check
   the logs for `Channel %s not found` warnings if it never appears.
+- **"Can't draw N winner(s)" when creating a giveaway**: expected — that prize doesn't
+  have enough unused codes once you account for other `pending`/`active` giveaways
+  already promised codes from the same pool. Load more codes, lower the winner count,
+  or wait for the other giveaway(s) to finish. See "Giveaway capacity checks" above.

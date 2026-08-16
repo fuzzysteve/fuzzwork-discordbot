@@ -4,11 +4,12 @@ import sys
 import click
 import questionary
 import requests
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from fuzzworkbot.config import Config, load_config
-from fuzzworkbot.db import Giveaway, GiveawayCode, Prize, RoleReaction, make_session_factory
+from fuzzworkbot.db import STATUS_FINISHED, Giveaway, GiveawayCode, GiveawayWinner, Prize, RoleReaction, make_session_factory
+from fuzzworkbot.giveaway_logic import available_code_count, unused_code_count
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 
@@ -91,14 +92,17 @@ def prize_list():
             click.echo("No prizes yet.")
             return
         for p in prizes:
-            unused = session.scalar(
-                select(func.count(GiveawayCode.id)).where(
-                    GiveawayCode.prize_id == p.id,
-                    GiveawayCode.assigned_to_discord_id.is_(None),
-                )
-            )
+            unused = unused_code_count(session, p.id)
+            available = available_code_count(session, p.id)
             status = "active" if p.active else "inactive"
-            click.echo(f"{p.id:>4}  {p.name:<30} {status:<8} {unused} unused code(s)")
+            if available == unused:
+                click.echo(f"{p.id:>4}  {p.name:<30} {status:<8} {unused} unused code(s)")
+            else:
+                reserved = unused - available
+                click.echo(
+                    f"{p.id:>4}  {p.name:<30} {status:<8} {unused} unused "
+                    f"({available} available, {reserved} reserved by running giveaways)"
+                )
 
 
 @main.group()
@@ -278,41 +282,49 @@ def giveaway_create():
     session_factory, config = _connect()
 
     with session_factory() as session:
-        stmt = (
-            select(Prize.id, Prize.name, func.count(GiveawayCode.id))
-            .join(GiveawayCode, GiveawayCode.prize_id == Prize.id)
-            .where(Prize.active.is_(True), GiveawayCode.assigned_to_discord_id.is_(None))
-            .group_by(Prize.id, Prize.name)
-        )
-        rows = session.execute(stmt).all()
+        prizes = session.scalars(select(Prize).where(Prize.active.is_(True))).all()
+        choices = []
+        for prize_row in prizes:
+            available = available_code_count(session, prize_row.id)
+            if available > 0:
+                choices.append(questionary.Choice(title=f"{prize_row.name} ({available} available)", value=prize_row.id))
 
-    if not rows:
-        click.echo("No active prizes with unused codes. Load some codes first.", err=True)
+    if not choices:
+        click.echo("No active prizes with available codes. Load some codes first.", err=True)
         sys.exit(1)
 
-    prize_id = questionary.select(
-        "Select prize pool:",
-        choices=[
-            questionary.Choice(title=f"{name} ({count} left)", value=prize_id) for prize_id, name, count in rows
-        ],
-    ).ask()
+    prize_id = questionary.select("Select prize pool:", choices=choices).ask()
     if prize_id is None:
         return
 
     duration_hours = questionary.text("Duration (hours):", default="24").ask()
+    winners = questionary.text("Number of winners:", default="1").ask()
     channel_id = questionary.text("Channel ID:").ask()
     guild_id = questionary.text("Guild ID:", default=str(config.guild_id)).ask()
-    if not duration_hours or not channel_id or not guild_id:
+    if not duration_hours or not winners or not channel_id or not guild_id:
         click.echo("Cancelled.")
         return
 
     with session_factory.begin() as session:
+        # Lock the prize row so this can't race a concurrent /creategiveaway or
+        # another CLI invocation for the same prize into over-promising codes.
+        prize_row = session.scalar(select(Prize).where(Prize.id == prize_id).with_for_update())
+        available = available_code_count(session, prize_row.id)
+        if int(winners) > available:
+            click.echo(
+                f"Can't draw {winners} winner(s) — only {available} code(s) available now "
+                "(someone else may have just created a giveaway for this prize).",
+                err=True,
+            )
+            sys.exit(1)
+
         session.add(
             Giveaway(
                 prize_id=prize_id,
                 guild_id=int(guild_id),
                 channel_id=int(channel_id),
                 duration_hours=int(duration_hours),
+                winner_count=int(winners),
             )
         )
 
@@ -331,11 +343,21 @@ def giveaway_list():
         for g in giveaways:
             prize_row = session.get(Prize, g.prize_id)
             prize_name = prize_row.name if prize_row else "?"
-            if g.winner_discord_id:
-                username = _resolve_username(g.winner_discord_id, config.discord_bot_token, username_cache)
-                detail = f"winner={g.winner_discord_id} ({username})"
+            if g.status == STATUS_FINISHED:
+                winner_rows = session.scalars(
+                    select(GiveawayWinner).where(GiveawayWinner.giveaway_id == g.id)
+                ).all()
+                if winner_rows:
+                    names = []
+                    for w in winner_rows:
+                        username = _resolve_username(w.discord_id, config.discord_bot_token, username_cache)
+                        suffix = "" if w.code_id else " [NO CODE]"
+                        names.append(f"{w.discord_id} ({username}){suffix}")
+                    detail = f"winners=[{', '.join(names)}]"
+                else:
+                    detail = "winners=none (no entrants)"
             else:
-                detail = f"channel={g.channel_id} ends_at={g.ends_at}"
+                detail = f"channel={g.channel_id} ends_at={g.ends_at} UTC winners_wanted={g.winner_count}"
             click.echo(f"{g.id:>4}  {g.status:<9} prize={prize_name:<25} {detail}")
 
 
