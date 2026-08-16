@@ -1,0 +1,16 @@
+[Unit]
+Description=Fuzzwork Discord bot
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/discordbot
+EnvironmentFile=/home/discordbot/.env
+ExecStart=/root/.local/bin/uv run fuzzworkbot
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.uv-cache/
+uv.lock.bak
+legacy/
+import.csv
