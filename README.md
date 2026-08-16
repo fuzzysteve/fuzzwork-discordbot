@@ -89,6 +89,7 @@ uv run giveaway-cli codes list "PLEX x2"             # shows each code and who (
 
 uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel
 uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
+uv run giveaway-cli giveaway winners <id>             # winners + their actual codes for one giveaway, CLI-only
 
 uv run giveaway-cli role-menu add \
   --guild-id <id> --channel-id <id> --message-id <id> \

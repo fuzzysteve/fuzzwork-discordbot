@@ -361,6 +361,42 @@ def giveaway_list():
             click.echo(f"{g.id:>4}  {g.status:<9} prize={prize_name:<25} {detail}")
 
 
+@giveaway.command("winners")
+@click.argument("giveaway_id", type=int)
+def giveaway_winners(giveaway_id: int):
+    """Show the winners and their actual codes for one giveaway. CLI-only — codes are
+    never surfaced through Discord itself except in the winner's own DM."""
+    session_factory, config = _connect()
+    with session_factory() as session:
+        giveaway = session.get(Giveaway, giveaway_id)
+        if giveaway is None:
+            click.echo(f"No giveaway with ID {giveaway_id}.", err=True)
+            sys.exit(1)
+
+        prize_row = session.get(Prize, giveaway.prize_id)
+        prize_name = prize_row.name if prize_row else "?"
+
+        winner_rows = session.scalars(
+            select(GiveawayWinner).where(GiveawayWinner.giveaway_id == giveaway_id)
+        ).all()
+        codes_by_id = {}
+        code_ids = [w.code_id for w in winner_rows if w.code_id is not None]
+        if code_ids:
+            for code_row in session.scalars(select(GiveawayCode).where(GiveawayCode.id.in_(code_ids))):
+                codes_by_id[code_row.id] = code_row.code
+
+    click.echo(f"Giveaway {giveaway_id} — {prize_name} (status: {giveaway.status})")
+    if not winner_rows:
+        click.echo("  No winners recorded yet.")
+        return
+
+    username_cache: dict[int, str] = {}
+    for w in winner_rows:
+        username = _resolve_username(w.discord_id, config.discord_bot_token, username_cache)
+        code = codes_by_id.get(w.code_id, "[NO CODE — deliver manually]") if w.code_id else "[NO CODE — deliver manually]"
+        click.echo(f"  {w.discord_id} ({username}): {code}")
+
+
 @main.group("role-menu")
 def role_menu():
     """Manage reaction-role mappings for existing Discord messages."""
