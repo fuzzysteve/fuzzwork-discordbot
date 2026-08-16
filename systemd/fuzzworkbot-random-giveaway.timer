@@ -1,0 +1,21 @@
+[Unit]
+Description=Periodically create a random Fuzzwork giveaway
+
+[Timer]
+# Matches giveaway-cli giveaway random's own default --duration-hours (48), so a new
+# one starts roughly as the previous one wraps up. Change both together if you want a
+# different cadence, or add an explicit --duration-hours to ExecStart in the .service
+# to decouple them.
+#
+# Deliberately no OnBootSec=: on a long-uptime box, a short OnBootSec is already
+# "elapsed" relative to actual boot time the moment the timer is enabled, and combined
+# with Persistent=true that makes systemd treat it as a missed run and fire immediately
+# on enable — found this the hard way (enabling the timer alone created a real,
+# unplanned giveaway). OnUnitActiveSec alone waits the full interval before the first
+# run, which is what's actually wanted here. Persistent=true still means a boundary
+# missed while the box was down gets caught up promptly after the next boot.
+OnUnitActiveSec=48h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

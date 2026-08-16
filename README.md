@@ -10,7 +10,9 @@ SQLAlchemy 2.0, MySQL, managed with [uv](https://docs.astral.sh/uv/).
   character, assigns a "verified" role, and syncs their nickname to their EVE character
   name. The actual EVE SSO + Discord OAuth login happens in a separate companion PHP
   app — see [EVE verification](#eve-verification) below.
-- **`/creategiveaway`** (and `giveaway-cli giveaway create`) — reaction giveaways drawn
+- **`/creategiveaway`** (and `giveaway-cli giveaway create`, or `giveaway-cli giveaway
+  random` for a fully unattended one — see [Automated random
+  giveaways](#automated-random-giveaways-optional)) — reaction giveaways drawn
   from pre-loaded prize/code pools, with one or more winners. The posted message states
   the end time in UTC; React to enter. After the configured duration, that many random
   reactors are picked, each DM'd their own code, and the winners announced publicly.
@@ -71,6 +73,30 @@ journalctl -u fuzzworkbot -f
 
 `Restart=on-failure` is set, so the bot comes back up if it crashes.
 
+### Automated random giveaways (optional)
+
+A systemd timer that periodically runs `giveaway-cli giveaway random` (see below) —
+picks a random active prize with enough available codes and queues a giveaway for it,
+unattended:
+
+```bash
+sudo cp systemd/fuzzworkbot-random-giveaway.service /etc/systemd/system/
+sudo cp systemd/fuzzworkbot-random-giveaway.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fuzzworkbot-random-giveaway.timer
+
+systemctl list-timers fuzzworkbot-random-giveaway.timer   # confirm the next scheduled run
+journalctl -u fuzzworkbot-random-giveaway.service -f       # each run's output
+```
+
+The timer fires every 48h (`OnUnitActiveSec=48h`, matching `giveaway random`'s own
+default `--duration-hours`, so a new one starts roughly as the previous wraps up) —
+**deliberately with no `OnBootSec=`**. A short `OnBootSec` on a box with real uptime is
+already "elapsed" the moment the timer is enabled, and combined with `Persistent=true`
+that makes systemd treat it as a missed run and fire *immediately* on enable — this
+created two unplanned real giveaways the first time this was set up. Don't add
+`OnBootSec=` back without a large value; `OnUnitActiveSec` alone correctly waits the
+full interval before its first run.
 ## Admin CLI (`giveaway-cli`)
 
 Run from `/home/discordbot` (needs the same `.env`/`DATABASE_URL` as the bot — it talks
@@ -88,6 +114,9 @@ uv run giveaway-cli codes import-csv export.csv      # bulk-import multiple priz
 uv run giveaway-cli codes list "PLEX x2"             # shows each code and who (if anyone) got it
 
 uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel
+uv run giveaway-cli giveaway random                  # non-interactive: random eligible prize,
+                                                      # defaults --duration-hours=48 --winners=1
+                                                      # --channel-id=825889984120356894; for cron/timers
 uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
 uv run giveaway-cli giveaway winners <id>             # winners + their actual codes for one giveaway, CLI-only
 

@@ -1,4 +1,5 @@
 import csv
+import random
 import sys
 
 import click
@@ -329,6 +330,63 @@ def giveaway_create():
         )
 
     click.echo("Giveaway queued. The bot will post it within about a minute.")
+
+
+DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
+
+
+@giveaway.command(
+    "random",
+    help="Create a giveaway for a randomly chosen active prize (only prizes with "
+    "enough available codes for the requested winner count are eligible). Fully "
+    "non-interactive — no prompts — for cron/systemd timer use.",
+)
+@click.option("--duration-hours", type=int, default=48, show_default=True)
+@click.option("--winners", type=int, default=1, show_default=True)
+@click.option("--channel-id", type=int, default=DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID, show_default=True)
+@click.option("--guild-id", type=int, default=None, help="Defaults to GUILD_ID from .env.")
+def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id: int | None):
+    session_factory, config = _connect()
+    guild_id = guild_id or config.guild_id
+
+    with session_factory() as session:
+        prizes = session.scalars(select(Prize).where(Prize.active.is_(True))).all()
+        eligible_ids = [p.id for p in prizes if available_code_count(session, p.id) >= winners]
+
+    if not eligible_ids:
+        click.echo(f"No active prize currently has {winners} available code(s). Nothing created.", err=True)
+        sys.exit(1)
+
+    chosen_id = random.choice(eligible_ids)
+
+    with session_factory.begin() as session:
+        # Lock the chosen prize row and re-check — another giveaway (CLI, /creategiveaway,
+        # or another timer run) could have consumed capacity between the scan above and here.
+        prize_row = session.scalar(select(Prize).where(Prize.id == chosen_id).with_for_update())
+        available = available_code_count(session, prize_row.id)
+        if winners > available:
+            click.echo(
+                f"Picked '{prize_row.name}' but it no longer has {winners} available code(s) "
+                f"(now {available}) — someone else just used it. Nothing created this run.",
+                err=True,
+            )
+            sys.exit(1)
+
+        session.add(
+            Giveaway(
+                prize_id=prize_row.id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                duration_hours=duration_hours,
+                winner_count=winners,
+            )
+        )
+        prize_name = prize_row.name
+
+    click.echo(
+        f"Random giveaway queued for '{prize_name}' ({winners} winner(s), {duration_hours}h) "
+        f"in channel {channel_id}. The bot will post it within about a minute."
+    )
 
 
 @giveaway.command("list")

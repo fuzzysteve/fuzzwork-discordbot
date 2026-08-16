@@ -40,6 +40,9 @@ whoever (human or Claude) touches it next.
   has no connection to the running bot process — see "CLI/bot decoupling" below.
 - `systemd/fuzzworkbot.service` — installed at `/etc/systemd/system/fuzzworkbot.service`
   (`systemctl {status,restart,...} fuzzworkbot`).
+- `systemd/fuzzworkbot-random-giveaway.{service,timer}` — installed the same way, drives
+  `giveaway-cli giveaway random` on a schedule. See the "systemd timer" note under
+  Conventions before touching `OnBootSec=`/`OnUnitActiveSec=` in the `.timer`.
 - `legacy/` — archived pre-rewrite Python 3.9 bot (`fuzzworkbot.py`, `swiftbot.py`) and
   its old venv. Reference only, nothing imports it. Safe to delete once confident.
 
@@ -62,6 +65,16 @@ whoever (human or Claude) touches it next.
   failed auth in a way that looked like a grants problem, not a code problem). If you
   ever need the real connection string from a `URL` object, use
   `.render_as_string(hide_password=False)`.
+- **systemd timer gotcha**: on a box with real (long) uptime, a `.timer` unit with a
+  short `OnBootSec=` is already "elapsed" relative to actual boot the instant the timer
+  is enabled — combined with `Persistent=true`, systemd treats that as a missed run and
+  fires the service *immediately* on `systemctl enable --now`, not after the interval.
+  This created two unplanned real giveaways the first time
+  `fuzzworkbot-random-giveaway.timer` was set up. `fuzzworkbot-random-giveaway.timer`
+  now deliberately has no `OnBootSec=` — `OnUnitActiveSec=` alone waits the full
+  interval before its first run. Don't add `OnBootSec=` to a recurring timer like this
+  without a large value (hours+), and if you do, test with `systemctl list-timers`
+  *before* `enable --now`, not after.
 - Cogs call `load_config()` again at module import time (in addition to `bot.py`
   calling it once to build the bot). This is intentional, not a mistake: disnake's
   `guild_ids=[...]` on `@commands.slash_command` needs a value at class-definition
@@ -86,13 +99,14 @@ whoever (human or Claude) touches it next.
   permission classifier blocked the `DROP COLUMN`/`DROP FOREIGN KEY` needed to remove
   them) but the ORM model no longer maps them — leave them alone, don't reintroduce
   code that reads/writes them.
-- Both `/creategiveaway` and `giveaway-cli giveaway create` must check
-  `giveaway_logic.available_code_count()` before inserting a new `Giveaway` row, and
-  must lock the `Prize` row (`select(Prize)...with_for_update()`) for the duration of
-  that check-and-insert. This is what stops an admin from creating a giveaway that
+- Every giveaway-creation path — `/creategiveaway`, `giveaway-cli giveaway create`, and
+  `giveaway-cli giveaway random` — must check `giveaway_logic.available_code_count()`
+  before inserting a new `Giveaway` row, and must lock the `Prize` row
+  (`select(Prize)...with_for_update()`) for the duration of that check-and-insert. This
+  is what stops an admin (or the random-giveaway timer) from creating a giveaway that
   promises more winners than the prize pool can actually cover once other still-running
   giveaways for the same prize are accounted for — don't add a new giveaway-creation
-  path (CLI command, slash command, whatever) without reusing this same check.
+  path without reusing this same check.
 
 ## Secrets
 

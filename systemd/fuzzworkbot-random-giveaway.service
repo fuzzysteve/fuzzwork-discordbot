@@ -1,0 +1,11 @@
+[Unit]
+Description=Fuzzwork Discord bot - create a random giveaway
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/discordbot
+EnvironmentFile=/home/discordbot/.env
+ExecStart=/home/discordbot/.venv/bin/giveaway-cli giveaway random
+User=root
