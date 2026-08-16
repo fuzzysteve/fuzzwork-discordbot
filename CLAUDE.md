@@ -24,9 +24,17 @@ whoever (human or Claude) touches it next.
     and `fuzzworkbot_cli/cli.py` so the two entry points can't diverge on the rule for
     "how many codes can this prize still promise."
   - `esi.py` — ESI character-name lookup via a `requests_cache.CachedSession`.
+  - `sde.py` — read-only lookups against Fuzzwork's own **separate** live EVE SDE MySQL
+    database (`eve` schema, `config.sde_database_url`) — item/ship types and the
+    universe map. This is not `db.py`'s database and has no ORM models (176 tables of
+    someone else's pre-existing schema isn't worth mapping); it's raw `text()` queries
+    via a second SQLAlchemy engine. `discordbot` MySQL user has read-only `SELECT` on
+    it. `_ranked_name_search()` does prefix-then-substring matching for autocomplete —
+    don't replace it with a plain `LIKE '%x%'`, see its docstring for why.
   - `bot.py` — builds the `InteractionBot`, attaches `bot.config` and
     `bot.session_factory`, loads the cogs, entrypoint (`fuzzworkbot` console script).
-  - `cogs/verification.py`, `cogs/giveaways.py`, `cogs/role_reactions.py`.
+  - `cogs/verification.py`, `cogs/giveaways.py`, `cogs/role_reactions.py`,
+    `cogs/eve_lookup.py`.
 - `src/fuzzworkbot_cli/cli.py` — `giveaway-cli` console script (click + questionary).
   Talks to MySQL directly via the same `db.py` models. It never talks to Discord and
   has no connection to the running bot process — see "CLI/bot decoupling" below.
@@ -48,6 +56,12 @@ whoever (human or Claude) touches it next.
   `session.scalar(s)`/`session.get()`, and `session_factory.begin()` as a context
   manager for any write — never rely on session autobegin, and never index a `Row`
   positionally/by dict key.
+- `str(some_sqlalchemy_url)` masks the password as `***` by default (it's
+  `render_as_string(hide_password=True)`) — this bit `config.py`'s derived
+  `sde_database_url` (silently produced a URL with a literal `***` password, which then
+  failed auth in a way that looked like a grants problem, not a code problem). If you
+  ever need the real connection string from a `URL` object, use
+  `.render_as_string(hide_password=False)`.
 - Cogs call `load_config()` again at module import time (in addition to `bot.py`
   calling it once to build the bot). This is intentional, not a mistake: disnake's
   `guild_ids=[...]` on `@commands.slash_command` needs a value at class-definition

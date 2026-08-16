@@ -20,6 +20,9 @@ SQLAlchemy 2.0, MySQL, managed with [uv](https://docs.astral.sh/uv/).
 - **Role reactions** — react to an existing message (e.g. in `#acl-management`) to gain
   a role; remove the reaction to lose it. Configured entirely via the CLI, no redeploy
   needed.
+- **`/type`, `/system`** — EVE item/ship and solar system lookups by name (with
+  autocomplete), read from Fuzzwork's own live SDE database. See
+  [EVE data lookups](#eve-data-lookups) below.
 
 ## Requirements
 
@@ -53,6 +56,7 @@ uv run fuzzworkbot     # foreground run, Ctrl-C to stop — good for first-time 
 | `VALIDATED_ROLE_ID` | Role granted by `/authme`. Copy Role ID from Server Settings → Roles. |
 | `DATABASE_URL` | SQLAlchemy URL, e.g. `mysql+pymysql://discordbot:<password>@localhost/discordbot`. |
 | `ESI_USER_AGENT` | Sent on ESI requests per CCP's third-party dev guidelines — include a contact. |
+| `SDE_DATABASE_URL` | Optional. Defaults to `DATABASE_URL` with the schema swapped to `eve` (same host/user/password) — only set this if the SDE ever lives somewhere else. See [EVE data lookups](#eve-data-lookups). |
 
 ## Running as a service
 
@@ -163,6 +167,43 @@ table, resolves the character name via ESI, and assigns the role. Its source liv
 this repo too, under `web/discord-auth/` — but that's a version-controlled *copy*, not
 a symlink to the live path, so changes need to be manually copied to the server to take
 effect. See `web/discord-auth/README.md` for details/setup, including `secret.php`.
+
+## EVE data lookups
+
+`/type <name>` and `/system <name>` (`cogs/eve_lookup.py`, `sde.py`) read from
+Fuzzwork's own live SDE database — the `eve` MySQL schema on the same server, already
+used by many fuzzwork.co.uk tools (`invTypes`, `mapDenormalize`, etc.), **not** this
+bot's own `discordbot` database. The `discordbot` MySQL user has been granted read-only
+(`SELECT`) access to it; `SDE_DATABASE_URL` defaults to `DATABASE_URL` with the schema
+swapped, so no separate credential is needed unless the SDE ever moves elsewhere.
+
+Both commands are rate-limited to once per 30 seconds per user
+(`@commands.cooldown(1, 30, commands.BucketType.user)`); hitting it gets an ephemeral
+"Slow down" reply instead of a raw error.
+
+- `/type` — looks up any published item/ship by exact name (autocomplete suggests
+  matches as you type — prefix matches first, then substring matches, so typing "Rif"
+  surfaces "Rifter" instead of 25 unrelated items that merely contain "rif"). Shows
+  group/category, mass/volume/cargo. If the item is a ship (category `Ship`), also
+  shows a curated set of dogma attributes grouped like a fitting tool would (slots,
+  hardpoints, CPU/powergrid, tank, capacitor, speed, targeting, drones) — see
+  `sde.SHIP_ATTRIBUTE_GROUPS` for exactly which attributes and how they're grouped;
+  there are 100+ raw dogma attributes per ship and most are internal/irrelevant, so this
+  is deliberately a curated subset, not a dump.
+- `/system <name>` — looks up a solar system by exact name and replies with two embeds:
+  1. the system's own details: `solarSystemID`/`constellationID`/`regionID` resolved to
+     names (via `mapSolarSystems`/`mapConstellations`/`mapRegions`, not left as bare
+     numbers), plus `itemID`/`typeID`/`groupID`/`orbitID`/`radius`/`security`. `x`/`y`/`z`
+     and `celestialIndex`/`orbitIndex` are deliberately left out — raw coordinates
+     without the rest of the position math aren't useful in a summary card. Also
+     **Neighbours** — every system one stargate jump away, resolved through `mapJumps`
+     (stargate → its far-end stargate → that stargate's system). Empty for systems with
+     no stargates (most wormhole/J-space systems).
+  2. its **contents** — every other `mapDenormalize` row sharing that `solarSystemID`
+     (sun, planets, moons, stations, stargates, belts, ...), grouped by type with a
+     count, e.g. `Moon (33)`, `Station (18)`. A busy system's full name list can exceed
+     Discord's 1024-char field limit (Jita has 68 mapDenormalize rows total) — each
+     group's field is truncated with a "… and N more" suffix rather than erroring.
 
 ## Role reactions
 
