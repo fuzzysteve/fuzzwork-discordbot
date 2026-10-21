@@ -9,7 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from fuzzworkbot.config import Config, load_config
-from fuzzworkbot.db import STATUS_FINISHED, Giveaway, GiveawayCode, GiveawayWinner, Prize, RoleReaction, make_session_factory
+from fuzzworkbot.db import (
+    STATUS_FINISHED,
+    Giveaway,
+    GiveawayCode,
+    GiveawayWinner,
+    Prize,
+    RoleReaction,
+    make_session_factory,
+    now_utc,
+)
 from fuzzworkbot.giveaway_logic import available_code_count, unused_code_count
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
@@ -183,11 +192,13 @@ def codes_list(prize_name: str):
 
     username_cache: dict[int, str] = {}
     for c in code_rows:
-        if c.assigned_to_discord_id:
+        if c.assigned_at is None:
+            status = "unused"
+        elif c.assigned_to_discord_id is not None:
             username = _resolve_username(c.assigned_to_discord_id, config.discord_bot_token, username_cache)
             status = f"given to {c.assigned_to_discord_id} ({username}) at {c.assigned_at}"
         else:
-            status = "unused"
+            status = f"given to {c.assigned_note} at {c.assigned_at}"
         click.echo(f"{c.code:<30} {status}")
 
 
@@ -271,6 +282,181 @@ def codes_import_csv(file_path: str):
     if given_column:
         summary += f", {skipped_given} already-given row(s) skipped"
     click.echo(summary + ").")
+
+
+def _validate_redeem_target(discord_id: int | None, note: str | None) -> None:
+    if (discord_id is None) == (note is None):
+        click.echo("Pass exactly one of --for (a Discord user ID) or --note (a non-Discord recipient).", err=True)
+        sys.exit(1)
+    if discord_id is not None and discord_id <= 0:
+        click.echo("--for must be a real Discord user ID (snowflake), not 0.", err=True)
+        sys.exit(1)
+    if note is not None and not note.strip():
+        click.echo("--note can't be blank.", err=True)
+        sys.exit(1)
+
+
+def _describe_redeem_target(discord_id: int | None, note: str | None, token: str) -> str:
+    if discord_id is not None:
+        username = _resolve_username(discord_id, token, {})
+        return f"{discord_id} ({username})"
+    return note  # type: ignore[return-value]
+
+
+def _prompt_redeem_target() -> tuple[int | None, str | None]:
+    """Interactive fallback for --for/--note — used whenever neither flag was passed on
+    the command line, so `codes redeem`/`redeem-random` are menu-driven by default and
+    only need flags for scripted/non-interactive use."""
+    target_type = questionary.select(
+        "Who is this code for?",
+        choices=[
+            questionary.Choice(title="A Discord user (by ID)", value="discord"),
+            questionary.Choice(title="Someone with no Discord ID (free-text note)", value="note"),
+        ],
+    ).ask()
+    if target_type is None:
+        click.echo("Cancelled.")
+        sys.exit(1)
+
+    if target_type == "discord":
+        raw_id = questionary.text("Discord user ID:").ask()
+        if not raw_id or not raw_id.strip():
+            click.echo("Cancelled.")
+            sys.exit(1)
+        try:
+            discord_id = int(raw_id.strip())
+        except ValueError:
+            click.echo("Discord user ID must be numeric.", err=True)
+            sys.exit(1)
+        return discord_id, None
+
+    note = questionary.text("Note describing the recipient (e.g. 'forum: JohnDoe'):").ask()
+    if not note or not note.strip():
+        click.echo("Cancelled.")
+        sys.exit(1)
+    return None, note.strip()
+
+
+def _prompt_prize_choice(session) -> int:
+    """Interactive fallback for the prize_name argument on `codes redeem`."""
+    prizes = session.scalars(select(Prize).where(Prize.active.is_(True))).all()
+    choices = []
+    for prize_row in prizes:
+        unused = unused_code_count(session, prize_row.id)
+        if unused > 0:
+            choices.append(questionary.Choice(title=f"{prize_row.name} ({unused} unused)", value=prize_row.id))
+
+    if not choices:
+        click.echo("No active prizes with unused codes.", err=True)
+        sys.exit(1)
+
+    prize_id = questionary.select("Select prize:", choices=choices).ask()
+    if prize_id is None:
+        click.echo("Cancelled.")
+        sys.exit(1)
+    return prize_id
+
+
+@codes.command(
+    "redeem-random",
+    help="Pull a random unused code from any active prize and mark it used — for handing "
+    "a code to someone outside the normal giveaway-reaction flow (e.g. they won some "
+    "other way). Menu-driven when run without --for/--note; pass one of them to skip "
+    "the prompt for scripted use. CLI-only; does not touch Discord.",
+)
+@click.option("--for", "discord_id", type=int, default=None, help="Discord user ID receiving the code.")
+@click.option(
+    "--note",
+    default=None,
+    help="Free-text description of a non-Discord recipient, e.g. 'forum: JohnDoe' — use "
+    "this instead of --for when there's no Discord ID.",
+)
+def codes_redeem_random(discord_id: int | None, note: str | None):
+    if discord_id is None and note is None:
+        discord_id, note = _prompt_redeem_target()
+    _validate_redeem_target(discord_id, note)
+
+    session_factory, config = _connect()
+
+    with session_factory.begin() as session:
+        active_prize_ids = session.scalars(select(Prize.id).where(Prize.active.is_(True))).all()
+        candidates = session.scalars(
+            select(GiveawayCode)
+            .where(GiveawayCode.prize_id.in_(active_prize_ids), GiveawayCode.assigned_at.is_(None))
+            .with_for_update()
+        ).all()
+        if not candidates:
+            click.echo("No unused codes available for any active prize.", err=True)
+            sys.exit(1)
+
+        code_row = random.choice(candidates)
+        code_row.assigned_to_discord_id = discord_id
+        code_row.assigned_note = note
+        code_row.assigned_at = now_utc()
+        code_text = code_row.code
+        prize_row = session.get(Prize, code_row.prize_id)
+        prize_name = prize_row.name if prize_row else "?"
+
+    target = _describe_redeem_target(discord_id, note, config.discord_bot_token)
+    click.echo(f"Redeemed '{prize_name}' code for {target}: {code_text}")
+
+
+@codes.command(
+    "redeem",
+    help="Pull a random unused code for a specific prize and mark it used — for handing "
+    "a code to someone outside the normal giveaway-reaction flow (e.g. they won some "
+    "other way). Menu-driven when run with no arguments; pass PRIZE_NAME and one of "
+    "--for/--note to skip the prompts for scripted use. CLI-only; does not touch Discord.",
+)
+@click.argument("prize_name", required=False, default=None)
+@click.option("--for", "discord_id", type=int, default=None, help="Discord user ID receiving the code.")
+@click.option(
+    "--note",
+    default=None,
+    help="Free-text description of a non-Discord recipient, e.g. 'forum: JohnDoe' — use "
+    "this instead of --for when there's no Discord ID.",
+)
+def codes_redeem(prize_name: str | None, discord_id: int | None, note: str | None):
+    if discord_id is None and note is None:
+        discord_id, note = _prompt_redeem_target()
+    _validate_redeem_target(discord_id, note)
+
+    session_factory, config = _connect()
+
+    # Resolve the prize in a plain (non-transactional) session first, so an
+    # interactive prompt here doesn't leave a write transaction open while
+    # waiting on the user.
+    if prize_name is None:
+        with session_factory() as session:
+            prize_id = _prompt_prize_choice(session)
+    else:
+        with session_factory() as session:
+            prize_row = session.scalar(select(Prize).where(Prize.name == prize_name))
+            if prize_row is None:
+                click.echo(f"No prize named '{prize_name}'.", err=True)
+                sys.exit(1)
+            prize_id = prize_row.id
+
+    with session_factory.begin() as session:
+        prize_row = session.get(Prize, prize_id)
+        candidates = session.scalars(
+            select(GiveawayCode)
+            .where(GiveawayCode.prize_id == prize_id, GiveawayCode.assigned_at.is_(None))
+            .with_for_update()
+        ).all()
+        if not candidates:
+            click.echo(f"No unused codes left for '{prize_row.name}'.", err=True)
+            sys.exit(1)
+
+        code_row = random.choice(candidates)
+        code_row.assigned_to_discord_id = discord_id
+        code_row.assigned_note = note
+        code_row.assigned_at = now_utc()
+        code_text = code_row.code
+        name = prize_row.name
+
+    target = _describe_redeem_target(discord_id, note, config.discord_bot_token)
+    click.echo(f"Redeemed '{name}' code for {target}: {code_text}")
 
 
 @main.group()

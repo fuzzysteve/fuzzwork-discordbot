@@ -99,6 +99,16 @@ whoever (human or Claude) touches it next.
   permission classifier blocked the `DROP COLUMN`/`DROP FOREIGN KEY` needed to remove
   them) but the ORM model no longer maps them — leave them alone, don't reintroduce
   code that reads/writes them.
+- `GiveawayCode`'s used/unused state is decided by `assigned_at` (`IS NULL` = unused),
+  never by `assigned_to_discord_id` alone — a code can be claimed by a Discord winner
+  (`assigned_to_discord_id` set) or handed out manually to someone with no Discord ID via
+  `giveaway-cli codes redeem`/`redeem-random --note` (`assigned_note` set instead,
+  `assigned_to_discord_id` left null). Checking `assigned_to_discord_id IS NULL` as the
+  "unused" signal was the original design and is now wrong on two counts: it misses
+  `--note`-redeemed codes (still null, so they'd look unused) and it broke once for a
+  Discord ID of `0` passed to `--for`, since `0` is falsy in Python — a truthy check on
+  it in `codes list` printed "unused" for an already-consumed code. Always filter/check
+  on `assigned_at`.
 - Every giveaway-creation path — `/creategiveaway`, `giveaway-cli giveaway create`, and
   `giveaway-cli giveaway random` — must check `giveaway_logic.available_code_count()`
   before inserting a new `Giveaway` row, and must lock the `Prize` row

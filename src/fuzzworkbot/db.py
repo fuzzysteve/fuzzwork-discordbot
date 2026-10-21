@@ -58,7 +58,12 @@ class GiveawayCode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     prize_id: Mapped[int] = mapped_column(ForeignKey("prizes.id"), nullable=False)
     code: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "Used" is decided by assigned_at, not by either of the two columns below — a code
+    # can be claimed by a Discord winner (assigned_to_discord_id set) or handed out
+    # manually to someone with no Discord ID (assigned_note set instead), so neither
+    # column alone is a reliable used/unused signal on its own.
     assigned_to_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    assigned_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     assigned_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 

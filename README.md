@@ -112,6 +112,16 @@ uv run giveaway-cli codes import-csv export.csv      # bulk-import multiple priz
                                                       # 'prize'/'code' header columns, order
                                                       # doesn't matter, optional 'given' column
 uv run giveaway-cli codes list "PLEX x2"             # shows each code and who (if anyone) got it
+uv run giveaway-cli codes redeem                     # menu-driven: pick prize, pick recipient
+                                                      # type (Discord user / free-text note), pulls
+                                                      # a random unused code for that prize and
+                                                      # marks it used — for handing a code out
+                                                      # manually, outside a giveaway
+uv run giveaway-cli codes redeem-random               # same, but the prize is also picked at
+                                                      # random from active prizes
+uv run giveaway-cli codes redeem "PLEX x2" --for <discord-id>       # non-interactive form, for
+                                                      # scripting — skips the menus; exactly one
+uv run giveaway-cli codes redeem "PLEX x2" --note "forum: JohnDoe"  # of --for/--note
 
 uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel
 uv run giveaway-cli giveaway random                  # non-interactive: random eligible prize,

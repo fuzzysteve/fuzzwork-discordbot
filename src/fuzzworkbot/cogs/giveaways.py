@@ -192,7 +192,7 @@ class Giveaways(commands.Cog):
                     select(GiveawayCode)
                     .where(
                         GiveawayCode.prize_id == giveaway.prize_id,
-                        GiveawayCode.assigned_to_discord_id.is_(None),
+                        GiveawayCode.assigned_at.is_(None),
                     )
                     .with_for_update()
                     .limit(1)

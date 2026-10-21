@@ -9,7 +9,7 @@ def unused_code_count(session: Session, prize_id: int) -> int:
         session.scalar(
             select(func.count(GiveawayCode.id)).where(
                 GiveawayCode.prize_id == prize_id,
-                GiveawayCode.assigned_to_discord_id.is_(None),
+                GiveawayCode.assigned_at.is_(None),
             )
         )
         or 0
