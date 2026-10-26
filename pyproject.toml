@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 fuzzworkbot = "fuzzworkbot.bot:main"
 giveaway-cli = "fuzzworkbot_cli.cli:main"
+fuzzworkbot-update-check = "fuzzworkbot.update_check:main"
 
 [build-system]
 requires = ["hatchling"]

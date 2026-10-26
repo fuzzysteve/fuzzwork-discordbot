@@ -43,6 +43,11 @@ whoever (human or Claude) touches it next.
 - `systemd/fuzzworkbot-random-giveaway.{service,timer}` — installed the same way, drives
   `giveaway-cli giveaway random` on a schedule. See the "systemd timer" note under
   Conventions before touching `OnBootSec=`/`OnUnitActiveSec=` in the `.timer`.
+- `systemd/fuzzworkbot-update-check.{service,timer}` — daily (09:00 Berlin) run of
+  `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
+  outdated Python packages (this venv and `/home/scripts/compression`'s) and direct
+  Composer packages (the *live* discord-auth copy), posted to Discord channel
+  972857594257498153 via REST with the bot token. Silent when nothing is outdated. `--dry-run` prints instead of posting.
 - `legacy/` — archived pre-rewrite Python 3.9 bot (`fuzzworkbot.py`, `swiftbot.py`) and
   its old venv. Reference only, nothing imports it. Safe to delete once confident.
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Fuzzwork Discord bot - report outdated Python/Composer dependencies
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/discordbot
+EnvironmentFile=/home/discordbot/.env
+ExecStart=/root/.local/bin/uv run fuzzworkbot-update-check
+User=root
