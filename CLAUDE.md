@@ -48,7 +48,10 @@ whoever (human or Claude) touches it next.
   outdated Python packages (this venv, `/home/scripts/compression`'s and
   `/home/web/fuzzwork/pyapi`'s) and direct
   Composer packages (the *live* discord-auth copy), posted to Discord channel
-  972857594257498153 via REST with the bot token. Silent when nothing is outdated. `--dry-run` prints instead of posting.
+  972857594257498153 via REST with the bot token. Each update (package + latest
+  version) is posted the day it first appears, then re-posted at most weekly while still
+  pending; last-posted dates live in `/var/lib/fuzzworkbot/update-check.json` (delete it
+  to re-announce everything). Silent when nothing is new or due. `--dry-run` prints instead of posting.
 - `legacy/` — archived pre-rewrite Python 3.9 bot (`fuzzworkbot.py`, `swiftbot.py`) and
   its old venv. Reference only, nothing imports it. Safe to delete once confident.
 
