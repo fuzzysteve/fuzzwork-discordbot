@@ -45,7 +45,8 @@ whoever (human or Claude) touches it next.
   Conventions before touching `OnBootSec=`/`OnUnitActiveSec=` in the `.timer`.
 - `systemd/fuzzworkbot-update-check.{service,timer}` — daily (09:00 Berlin) run of
   `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
-  outdated Python packages (this venv and `/home/scripts/compression`'s) and direct
+  outdated Python packages (this venv, `/home/scripts/compression`'s and
+  `/home/web/fuzzwork/pyapi`'s) and direct
   Composer packages (the *live* discord-auth copy), posted to Discord channel
   972857594257498153 via REST with the bot token. Silent when nothing is outdated. `--dry-run` prints instead of posting.
 - `legacy/` — archived pre-rewrite Python 3.9 bot (`fuzzworkbot.py`, `swiftbot.py`) and

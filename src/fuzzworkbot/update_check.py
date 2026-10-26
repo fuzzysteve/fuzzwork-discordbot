@@ -1,5 +1,5 @@
-"""Daily dependency check: reports outdated Python packages (this repo's uv venv and the
-compression optimizer's) and outdated direct Composer packages (the live discord-auth PHP app) to a Discord channel.
+"""Daily dependency check: reports outdated Python packages (this repo's uv venv, the
+compression optimizer's and fuzzwork pyapi's) and outdated direct Composer packages (the live discord-auth PHP app) to a Discord channel.
 
 Read-only — it never upgrades anything. Posts via Discord's REST API with the bot
 token, no gateway connection, so it works whether or not the bot process is up.
@@ -23,6 +23,7 @@ DEFAULT_CHANNEL_ID = 972857594257498153
 REPO_DIR = Path(__file__).resolve().parents[2]
 LIVE_PHP_APP_DIR = Path("/home/web/fuzzwork/htdocs/discord-auth")
 COMPRESSION_DIR = Path("/home/scripts/compression")
+PYAPI_DIR = Path("/home/web/fuzzwork/pyapi")
 DISCORD_MESSAGE_LIMIT = 2000
 
 
@@ -87,6 +88,11 @@ def main(channel_id: int, dry_run: bool):
         "Python (compression)",
         f"cd {COMPRESSION_DIR} && uv lock --upgrade && uv sync && systemctl restart eve-compression",
         lambda: _python_outdated(COMPRESSION_DIR),
+    )
+    lines += _section(
+        "Python (pyapi)",
+        f"cd {PYAPI_DIR} && uv lock --upgrade && uv sync && systemctl restart fuzzwork-pyapi",
+        lambda: _python_outdated(PYAPI_DIR),
     )
     lines += _section(
         "PHP (discord-auth, live)", f"cd {LIVE_PHP_APP_DIR} && composer update", _composer_outdated
