@@ -59,6 +59,29 @@ def test_section_newer_release_is_announced_immediately():
     assert new_state == {"Py|requests|2.2": "2026-10-28"}  # resolved 2.1 key forgotten
 
 
+def test_section_skips_listed_packages(monkeypatch, capsys):
+    monkeypatch.setattr(update_check, "SKIPPED_UPDATES", {("Py", "cbcbox"): "known bad"})
+    state = {"Py|cbcbox|2.935": "2026-10-01"}  # even if previously posted and due again
+
+    lines, new_state = _section([("CBCBox", "2.929", "2.935"), ("requests", "2.0", "2.1")], state)
+
+    assert "requests" in "\n".join(lines) and "CBCBox" not in "\n".join(lines)
+    assert new_state == {"Py|requests|2.1": "2026-10-28"}
+    assert "Skipped Py: CBCBox 2.929 -> 2.935 (known bad)" in capsys.readouterr().out
+
+
+def test_skip_is_scoped_to_its_section(monkeypatch):
+    monkeypatch.setattr(update_check, "SKIPPED_UPDATES", {("Other", "cbcbox"): "known bad"})
+    lines, _ = _section([("cbcbox", "2.929", "2.935")], {})
+    assert lines and "cbcbox" in lines[2]
+
+
+def test_skipped_entries_are_lowercase_and_name_real_sections():
+    titles = {"uv", "Python (bot)", "Python (compression)", "Python (pyapi)", "PHP (discord-auth, live)"}
+    for (title, name), reason in update_check.SKIPPED_UPDATES.items():
+        assert title in titles and name == name.lower() and reason
+
+
 def test_section_failure_keeps_state_for_that_section_only():
     state = {"Py|requests|2.1": "2026-10-27", "Other|x|1": "2026-10-27"}
     new_state = {}

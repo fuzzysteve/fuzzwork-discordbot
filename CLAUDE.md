@@ -53,6 +53,9 @@ whoever (human or Claude) touches it next.
   version) is posted the day it first appears, then re-posted at most weekly while still
   pending; last-posted dates live in `/var/lib/fuzzworkbot/update-check.json` (delete it
   to re-announce everything). Silent when nothing is new or due. `--dry-run` prints instead of posting.
+  Updates deliberately not being taken go in `SKIPPED_UPDATES` in `update_check.py`
+  (`(section title, lowercase package name) -> reason`): never posted, only logged to
+  the journal each run. Currently: compression's `cbcbox` (see that repo's CLAUDE.md).
 - `legacy/` — archived pre-rewrite Python 3.9 bot (`fuzzworkbot.py`, `swiftbot.py`) and
   its old venv. Reference only, nothing imports it. Safe to delete once confident.
 

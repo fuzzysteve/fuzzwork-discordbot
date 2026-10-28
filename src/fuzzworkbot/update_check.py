@@ -33,6 +33,17 @@ DISCORD_MESSAGE_LIMIT = 2000
 STATE_FILE = Path("/var/lib/fuzzworkbot/update-check.json")
 REMIND_AFTER = timedelta(days=7)
 
+# Updates that are deliberately not being taken: (section title, lowercase package
+# name) -> why.
+# Never posted to Discord (any version), only logged on each run; remove an entry to
+# have the package reported again (it's then announced as new).
+SKIPPED_UPDATES: dict[tuple[str, str], str] = {
+    ("Python (compression)", "cbcbox"): (
+        "held at the version pulp[cbc] allows (<2.931): 2.935 wrongly reported a feasible "
+        "request as infeasible; see /home/scripts/compression/CLAUDE.md"
+    ),
+}
+
 
 def _uv_path() -> str:
     # `uv run` exports its own path as $UV; fall back to PATH for manual runs.
@@ -102,6 +113,10 @@ def _section(title: str, how_to_update: str, check, state: dict[str, str],
         return [f"**{title}** — check failed: `{type(e).__name__}: {e}`"[:500]]
     outdated = []
     for name, current, latest in found:
+        skip_reason = SKIPPED_UPDATES.get((title, name.lower()))
+        if skip_reason is not None:
+            click.echo(f"Skipped {title}: {name} {current} -> {latest} ({skip_reason})")
+            continue
         key = f"{title}|{name}|{latest}"
         last_posted = state.get(key)
         if last_posted is None or today - date.fromisoformat(last_posted) >= REMIND_AFTER:
