@@ -45,7 +45,8 @@ whoever (human or Claude) touches it next.
   Conventions before touching `OnBootSec=`/`OnUnitActiveSec=` in the `.timer`.
 - `systemd/fuzzworkbot-update-check.{service,timer}` — daily (09:00 Berlin) run of
   `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
-  outdated Python packages (this venv, `/home/scripts/compression`'s and
+  a newer uv release (`uv self update --dry-run`; uv is a standalone install at
+  `/root/.local/bin/uv`, which both systemd units run through), outdated Python packages (this venv, `/home/scripts/compression`'s and
   `/home/web/fuzzwork/pyapi`'s) and direct
   Composer packages (the *live* discord-auth copy), posted to Discord channel
   972857594257498153 via REST with the bot token. Each update (package + latest
@@ -140,6 +141,23 @@ whoever (human or Claude) touches it next.
   and call it done.
 
 ## Testing without live Discord/MySQL
+
+```bash
+uv run pytest
+```
+
+The suite in `tests/` (pytest + pytest-asyncio, dev dependency group) runs every cog,
+`sde.py`, the CLI and `update_check.py` against throwaway SQLite files with Discord
+faked out — no live Discord, MySQL, SDE or network. `tests/conftest.py` sets every
+config env var before anything imports a cog (cogs call `load_config()` at import, and
+`load_dotenv()` only fills *unset* vars, so this keeps the real `.env` out). Slash
+commands are tested by calling `cog.<command>.callback(cog, inter, ...)` with a mock
+interaction; `no_task_loops` stops `Giveaways.__init__` from starting the real poller.
+`with_for_update()` is a no-op on SQLite, so the giveaway-capacity race is tested by
+simulating the competing insert (see `test_giveaway_random_rechecks_capacity_under_lock`),
+not by real concurrency.
+
+Quick import-only smoke test (no pytest needed):
 
 ```bash
 uv sync

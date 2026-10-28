@@ -1,4 +1,4 @@
-"""Daily dependency check: reports outdated Python packages (this repo's uv venv, the
+"""Daily dependency check: reports a newer uv release, outdated Python packages (this repo's uv venv, the
 compression optimizer's and fuzzwork pyapi's) and outdated direct Composer packages (the live discord-auth PHP app) to a Discord channel.
 
 An update (package + latest version) is posted the day it first appears, then at most
@@ -11,6 +11,7 @@ Driven by systemd/fuzzworkbot-update-check.{service,timer}.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,9 +34,28 @@ STATE_FILE = Path("/var/lib/fuzzworkbot/update-check.json")
 REMIND_AFTER = timedelta(days=7)
 
 
-def _python_outdated(project_dir: Path) -> list[tuple[str, str, str]]:
+def _uv_path() -> str:
     # `uv run` exports its own path as $UV; fall back to PATH for manual runs.
-    uv = os.environ.get("UV") or shutil.which("uv") or "/root/.local/bin/uv"
+    return os.environ.get("UV") or shutil.which("uv") or "/root/.local/bin/uv"
+
+
+def _uv_self_outdated() -> list[tuple[str, str, str]]:
+    # Standalone install, so `uv self update` works; --dry-run only reports.
+    result = subprocess.run(
+        [_uv_path(), "self", "update", "--dry-run"],
+        capture_output=True, text=True, check=True, timeout=120,
+    )
+    output = result.stdout + result.stderr
+    match = re.search(r"Would update uv from v(\S+) to v(\S+)", output)
+    if match:
+        return [("uv", match.group(1), match.group(2))]
+    if "already on version" in output:
+        return []
+    raise RuntimeError(f"unrecognised `uv self update --dry-run` output: {output.strip()[-200:]}")
+
+
+def _python_outdated(project_dir: Path) -> list[tuple[str, str, str]]:
+    uv = _uv_path()
     result = subprocess.run(
         # Explicit --python: under `uv run`, $VIRTUAL_ENV is the bot's venv and uv pip
         # would follow it regardless of cwd.
@@ -115,6 +135,7 @@ def _post(token: str, channel_id: int, content: str) -> None:
 def main(channel_id: int, dry_run: bool):
     state, new_state, today = _load_state(), {}, date.today()
     sections = [
+        ("uv", "uv self update, then smoke-test and systemctl restart fuzzworkbot", _uv_self_outdated),
         ("Python (bot)", "uv lock --upgrade && uv sync", lambda: _python_outdated(REPO_DIR)),
         ("Python (compression)",
          f"cd {COMPRESSION_DIR} && uv lock --upgrade && uv sync && systemctl restart eve-compression",
