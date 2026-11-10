@@ -47,7 +47,7 @@ whoever (human or Claude) touches it next.
   `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
   a newer uv release (`uv self update --dry-run`; uv is a standalone install at
   `/root/.local/bin/uv`, which both systemd units run through), outdated Python packages (this venv, `/home/scripts/compression`'s and
-  `/home/web/fuzzwork/pyapi`'s) and direct
+  `/home/web/fuzzwork/pyapi`'s and `/opt/pricegetter-redis`'s) and direct
   Composer packages (the *live* discord-auth copy), posted to Discord channel
   972857594257498153 via REST with the bot token. Each update (package + latest
   version) is posted the day it first appears, then re-posted at most weekly while still

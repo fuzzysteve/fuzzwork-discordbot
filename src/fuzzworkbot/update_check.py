@@ -1,5 +1,5 @@
 """Daily dependency check: reports a newer uv release, outdated Python packages (this repo's uv venv, the
-compression optimizer's and fuzzwork pyapi's) and outdated direct Composer packages (the live discord-auth PHP app) to a Discord channel.
+compression optimizer's, fuzzwork pyapi's and pricegetter-redis's) and outdated direct Composer packages (the live discord-auth PHP app) to a Discord channel.
 
 An update (package + latest version) is posted the day it first appears, then at most
 once every 7 days while it stays pending; last-posted dates are kept in STATE_FILE.
@@ -29,6 +29,7 @@ REPO_DIR = Path(__file__).resolve().parents[2]
 LIVE_PHP_APP_DIR = Path("/home/web/fuzzwork/htdocs/discord-auth")
 COMPRESSION_DIR = Path("/home/scripts/compression")
 PYAPI_DIR = Path("/home/web/fuzzwork/pyapi")
+PRICEGETTER_DIR = Path("/opt/pricegetter-redis")
 DISCORD_MESSAGE_LIMIT = 2000
 STATE_FILE = Path("/var/lib/fuzzworkbot/update-check.json")
 REMIND_AFTER = timedelta(days=7)
@@ -158,6 +159,11 @@ def main(channel_id: int, dry_run: bool):
         ("Python (pyapi)",
          f"cd {PYAPI_DIR} && uv lock --upgrade && uv sync && systemctl restart fuzzwork-pyapi",
          lambda: _python_outdated(PYAPI_DIR)),
+        # Timer-driven oneshots, no service to restart; holding loadPrices.lock keeps a
+        # scheduled run from starting mid-sync.
+        ("Python (pricegetter-redis)",
+         f"cd {PRICEGETTER_DIR} && uv lock --upgrade && flock loadPrices.lock uv sync",
+         lambda: _python_outdated(PRICEGETTER_DIR)),
         ("PHP (discord-auth, live)", f"cd {LIVE_PHP_APP_DIR} && composer update", _composer_outdated),
     ]
     lines = []

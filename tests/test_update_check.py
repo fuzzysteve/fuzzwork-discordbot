@@ -77,7 +77,7 @@ def test_skip_is_scoped_to_its_section(monkeypatch):
 
 
 def test_skipped_entries_are_lowercase_and_name_real_sections():
-    titles = {"uv", "Python (bot)", "Python (compression)", "Python (pyapi)", "PHP (discord-auth, live)"}
+    titles = {"uv", "Python (bot)", "Python (compression)", "Python (pyapi)", "Python (pricegetter-redis)", "PHP (discord-auth, live)"}
     for (title, name), reason in update_check.SKIPPED_UPDATES.items():
         assert title in titles and name == name.lower() and reason
 
