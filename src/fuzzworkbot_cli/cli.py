@@ -14,12 +14,19 @@ from fuzzworkbot.db import (
     Giveaway,
     GiveawayCode,
     GiveawayWinner,
+    NextGiveaway,
     Prize,
     RoleReaction,
     make_session_factory,
     now_utc,
 )
-from fuzzworkbot.giveaway_logic import available_code_count, unused_code_count
+from fuzzworkbot.giveaway_logic import (
+    available_code_count,
+    clear_next_giveaway,
+    get_next_giveaway,
+    set_next_giveaway,
+    unused_code_count,
+)
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 
@@ -524,8 +531,10 @@ DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
 @giveaway.command(
     "random",
     help="Create a giveaway for a randomly chosen active prize (only prizes with "
-    "enough available codes for the requested winner count are eligible). Fully "
-    "non-interactive — no prompts — for cron/systemd timer use.",
+    "enough available codes for the requested winner count are eligible). If a prize "
+    "has been chosen with 'giveaway next set', that's used instead (once) — falling "
+    "back to a random pick, and keeping the choice for the next run, if it can't be "
+    "covered right now. Fully non-interactive — no prompts — for cron/systemd timer use.",
 )
 @click.option("--duration-hours", type=int, default=48, show_default=True)
 @click.option("--winners", type=int, default=1, show_default=True)
@@ -534,6 +543,37 @@ DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
 def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id: int | None):
     session_factory, config = _connect()
     guild_id = guild_id or config.guild_id
+
+    with session_factory.begin() as session:
+        next_row = session.scalar(select(NextGiveaway).with_for_update())
+        if next_row is not None:
+            # Same lock-and-check as every other creation path (see CLAUDE.md).
+            prize_row = session.scalar(select(Prize).where(Prize.id == next_row.prize_id).with_for_update())
+            wanted = next_row.winner_count or winners
+            available = available_code_count(session, prize_row.id)
+            if prize_row.active and wanted <= available:
+                session.add(
+                    Giveaway(
+                        prize_id=prize_row.id,
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        duration_hours=duration_hours,
+                        winner_count=wanted,
+                    )
+                )
+                session.delete(next_row)
+                click.echo(
+                    f"Chosen next giveaway queued for '{prize_row.name}' ({wanted} winner(s), "
+                    f"{duration_hours}h) in channel {channel_id}. The bot will post it within about a minute."
+                )
+                return
+            reason = "it's inactive" if not prize_row.active else f"it only has {available} available code(s)"
+            click.echo(
+                f"Chosen next giveaway '{prize_row.name}' ({wanted} winner(s)) can't run — {reason}. "
+                "Keeping it for the next run and picking a random prize this time "
+                "(change it with 'giveaway next set' or 'giveaway next clear').",
+                err=True,
+            )
 
     with session_factory() as session:
         prizes = session.scalars(select(Prize).where(Prize.active.is_(True))).all()
@@ -573,6 +613,74 @@ def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id
         f"Random giveaway queued for '{prize_name}' ({winners} winner(s), {duration_hours}h) "
         f"in channel {channel_id}. The bot will post it within about a minute."
     )
+
+
+@giveaway.group(
+    "next",
+    help="Choose the prize the next 'giveaway random' run (the systemd timer) will use, "
+    "instead of a random one.",
+)
+def giveaway_next():
+    pass
+
+
+def _describe_next(session) -> str:
+    row = get_next_giveaway(session)
+    if row is None:
+        return "No next giveaway chosen — the next random run will pick a prize at random."
+    winners = f"{row.winner_count} winner(s)" if row.winner_count else "the run's --winners (default 1)"
+    return f"Next giveaway: '{row.prize.name}', {winners} (set {row.set_at} UTC)."
+
+
+@giveaway_next.command("set")
+@click.argument("prize_name", required=False, default=None)
+@click.option(
+    "--winners",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Winner count for that giveaway; omit to use the random run's own --winners.",
+)
+def giveaway_next_set(prize_name: str | None, winners: int | None):
+    """Set the next giveaway's prize. Menu-driven when PRIZE_NAME is omitted."""
+    session_factory, _ = _connect()
+
+    if prize_name is None:
+        with session_factory() as session:
+            prize_id = _prompt_prize_choice(session)
+    else:
+        with session_factory() as session:
+            prize_row = session.scalar(select(Prize).where(Prize.name == prize_name))
+            if prize_row is None:
+                click.echo(f"No prize named '{prize_name}'.", err=True)
+                sys.exit(1)
+            prize_id = prize_row.id
+
+    with session_factory.begin() as session:
+        prize_row = session.scalar(select(Prize).where(Prize.id == prize_id).with_for_update())
+        error = set_next_giveaway(session, prize_row, winners)
+        if error:
+            click.echo(f"Not set: {error}", err=True)
+            sys.exit(1)
+
+    with session_factory() as session:
+        click.echo(_describe_next(session))
+
+
+@giveaway_next.command("show")
+def giveaway_next_show():
+    """Show the chosen next giveaway, if any."""
+    session_factory, _ = _connect()
+    with session_factory() as session:
+        click.echo(_describe_next(session))
+
+
+@giveaway_next.command("clear")
+def giveaway_next_clear():
+    """Forget the chosen next giveaway; the next random run picks at random again."""
+    session_factory, _ = _connect()
+    with session_factory.begin() as session:
+        had_one = clear_next_giveaway(session)
+    click.echo("Cleared." if had_one else "No next giveaway was set.")
 
 
 @giveaway.command("list")

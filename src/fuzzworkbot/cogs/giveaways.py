@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from fuzzworkbot.config import load_config
 from fuzzworkbot.db import STATUS_ACTIVE, STATUS_FINISHED, STATUS_PENDING, Giveaway, GiveawayCode, GiveawayWinner, Prize, now_utc
-from fuzzworkbot.giveaway_logic import available_code_count
+from fuzzworkbot.giveaway_logic import available_code_count, clear_next_giveaway, get_next_giveaway, set_next_giveaway
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,55 @@ class Giveaways(commands.Cog):
 
         await inter.response.send_message(
             f"Giveaway for '{prize}' ({winners} winner(s)) queued. It will post within about a minute.",
+            ephemeral=True,
+        )
+
+    @commands.slash_command(
+        guild_ids=[_config.guild_id],
+        description="Choose the prize for the next automatic (timer) giveaway.",
+        default_member_permissions=disnake.Permissions(manage_guild=True),
+    )
+    async def nextgiveaway(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    @nextgiveaway.sub_command(name="set", description="Set the prize the next automatic giveaway will use.")
+    async def nextgiveaway_set(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        prize: str = commands.Param(autocomplete=autocomplete_prizes),
+        winners: int = commands.Param(default=None, gt=0, description="Omit to use the timer's default (1)."),
+    ):
+        with self.bot.session_factory.begin() as session:
+            prize_row = session.scalar(select(Prize).where(Prize.name == prize).with_for_update())
+            if prize_row is None:
+                await inter.response.send_message(f"No prize named '{prize}'.", ephemeral=True)
+                return
+            error = set_next_giveaway(session, prize_row, winners, set_by_discord_id=inter.author.id)
+        if error:
+            await inter.response.send_message(f"Not set: {error}", ephemeral=True)
+            return
+        winners_text = f"{winners} winner(s)" if winners else "the default winner count"
+        await inter.response.send_message(
+            f"The next automatic giveaway will be **{prize}** ({winners_text}).", ephemeral=True
+        )
+
+    @nextgiveaway.sub_command(name="show", description="Show the chosen next automatic giveaway, if any.")
+    async def nextgiveaway_show(self, inter: disnake.ApplicationCommandInteraction):
+        with self.bot.session_factory() as session:
+            row = get_next_giveaway(session)
+            if row is None:
+                message = "No next giveaway chosen — the next automatic one will be a random prize."
+            else:
+                winners_text = f"{row.winner_count} winner(s)" if row.winner_count else "the default winner count"
+                message = f"The next automatic giveaway will be **{row.prize.name}** ({winners_text})."
+        await inter.response.send_message(message, ephemeral=True)
+
+    @nextgiveaway.sub_command(name="clear", description="Go back to a random prize for the next automatic giveaway.")
+    async def nextgiveaway_clear(self, inter: disnake.ApplicationCommandInteraction):
+        with self.bot.session_factory.begin() as session:
+            had_one = clear_next_giveaway(session)
+        await inter.response.send_message(
+            "Cleared — the next automatic giveaway will be a random prize." if had_one else "No next giveaway was set.",
             ephemeral=True,
         )
 

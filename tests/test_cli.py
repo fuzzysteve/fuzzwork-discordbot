@@ -207,3 +207,66 @@ def test_role_menu_add_update_list_remove(run, session_factory):
 
     run("role-menu", "remove", "--message-id", "3", "--emoji", "👍")
     run("role-menu", "remove", "--message-id", "3", "--emoji", "👍", ok=False)
+
+
+# --- giveaway next ---------------------------------------------------------------
+
+
+def _next_row(session_factory):
+    from fuzzworkbot.db import NextGiveaway
+
+    with session_factory() as session:
+        return session.scalar(select(NextGiveaway))
+
+
+def test_giveaway_next_set_show_clear(run, session_factory, make_prize):
+    prize_id = make_prize(name="PLEX", codes=["A", "B"])
+    assert "No next giveaway chosen" in run("giveaway", "next", "show").output
+
+    assert "Next giveaway: 'PLEX', 2 winner(s)" in run("giveaway", "next", "set", "PLEX", "--winners", "2").output
+    make_prize(name="Skin", codes=["X"])
+    run("giveaway", "next", "set", "Skin")  # replaces, doesn't add a second row
+    row = _next_row(session_factory)
+    assert row.prize_id != prize_id and row.winner_count is None
+
+    assert "Cleared." in run("giveaway", "next", "clear").output
+    assert _next_row(session_factory) is None
+    assert "No next giveaway was set" in run("giveaway", "next", "clear").output
+
+
+def test_giveaway_next_set_rejects_unusable_prize(run, session_factory, make_prize):
+    make_prize(name="PLEX", codes=["A"])
+    make_prize(name="Old", codes=["X"], active=False)
+    assert "only has 1 code(s) available" in run("giveaway", "next", "set", "PLEX", "--winners", "2", ok=False).output
+    assert "inactive" in run("giveaway", "next", "set", "Old", ok=False).output
+    run("giveaway", "next", "set", "Nope", ok=False)
+    assert _next_row(session_factory) is None
+
+
+def test_giveaway_random_uses_and_consumes_next(run, session_factory, make_prize, monkeypatch):
+    make_prize(name="PLEX", codes=["A", "B", "C"])
+    skin_id = make_prize(name="Skin", codes=["X", "Y"])
+    run("giveaway", "next", "set", "Skin", "--winners", "2")
+    monkeypatch.setattr(cli.random, "choice", lambda ids: pytest.fail("should not pick at random"))
+
+    assert "Chosen next giveaway queued for 'Skin'" in run("giveaway", "random").output
+
+    with session_factory() as session:
+        giveaway = session.scalar(select(Giveaway))
+    assert (giveaway.prize_id, giveaway.winner_count) == (skin_id, 2)
+    assert _next_row(session_factory) is None
+
+
+def test_giveaway_random_falls_back_when_next_cant_run(run, session_factory, make_prize, make_giveaway):
+    plex_id = make_prize(name="PLEX", codes=["A"])
+    skin_id = make_prize(name="Skin", codes=["X"])
+    run("giveaway", "next", "set", "Skin")
+    make_giveaway(skin_id, status=STATUS_ACTIVE)  # uses up Skin's only code after it was chosen
+
+    result = run("giveaway", "random")
+
+    assert "can't run" in result.output and "Random giveaway queued for 'PLEX'" in result.output
+    with session_factory() as session:
+        new = session.scalar(select(Giveaway).where(Giveaway.prize_id == plex_id))
+    assert new is not None
+    assert _next_row(session_factory).prize_id == skin_id  # kept for the next run

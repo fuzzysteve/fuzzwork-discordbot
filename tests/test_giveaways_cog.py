@@ -253,3 +253,40 @@ async def test_finish_skips_non_active(cog, channel, session_factory, make_prize
 
 def test_module_config_uses_test_guild():
     assert giveaways_module._config.guild_id == 1000
+
+
+# --- /nextgiveaway ---------------------------------------------------------------
+
+
+async def test_nextgiveaway_set_show_clear(cog, session_factory, make_prize):
+    from fuzzworkbot.db import NextGiveaway
+
+    prize_id = make_prize(name="PLEX", codes=["A", "B"])
+    inter = fake_interaction(author_id=42)
+
+    await cog.nextgiveaway_set.callback(cog, inter, prize="PLEX", winners=2)
+    assert "**PLEX** (2 winner(s))" in inter.response.send_message.call_args.args[0]
+    with session_factory() as session:
+        row = session.scalar(select(NextGiveaway))
+    assert (row.prize_id, row.winner_count, row.set_by_discord_id) == (prize_id, 2, 42)
+
+    inter = fake_interaction()
+    await cog.nextgiveaway_show.callback(cog, inter)
+    assert "**PLEX**" in inter.response.send_message.call_args.args[0]
+
+    inter = fake_interaction()
+    await cog.nextgiveaway_clear.callback(cog, inter)
+    assert "Cleared" in inter.response.send_message.call_args.args[0]
+    with session_factory() as session:
+        assert session.scalar(select(NextGiveaway)) is None
+
+
+async def test_nextgiveaway_set_rejects_over_capacity(cog, session_factory, make_prize):
+    from fuzzworkbot.db import NextGiveaway
+
+    make_prize(name="PLEX", codes=["A"])
+    inter = fake_interaction()
+    await cog.nextgiveaway_set.callback(cog, inter, prize="PLEX", winners=3)
+    assert "Not set" in inter.response.send_message.call_args.args[0]
+    with session_factory() as session:
+        assert session.scalar(select(NextGiveaway)) is None

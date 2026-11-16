@@ -97,6 +97,13 @@ that makes systemd treat it as a missed run and fire *immediately* on enable —
 created two unplanned real giveaways the first time this was set up. Don't add
 `OnBootSec=` back without a large value; `OnUnitActiveSec` alone correctly waits the
 full interval before its first run.
+
+To pick what the next timer run creates instead of leaving it random, use
+`/nextgiveaway set` in Discord (Manage Server permission) or `giveaway-cli giveaway next
+set`. The choice is used once and then cleared. If, when the timer fires, that prize is
+inactive or can't cover the winner count any more, the run falls back to a random prize
+and keeps the choice for the following run (the warning shows in the journal).
+
 ## Admin CLI (`giveaway-cli`)
 
 Run from `/home/discordbot` (needs the same `.env`/`DATABASE_URL` as the bot — it talks
@@ -127,6 +134,12 @@ uv run giveaway-cli giveaway create                  # interactive: pick prize, 
 uv run giveaway-cli giveaway random                  # non-interactive: random eligible prize,
                                                       # defaults --duration-hours=48 --winners=1
                                                       # --channel-id=825889984120356894; for cron/timers
+uv run giveaway-cli giveaway next set "PLEX x2"      # make the next `giveaway random` run (the timer)
+                                                      # use this prize instead of a random one; used
+                                                      # once, then cleared. Optional --winners N; omit
+                                                      # PRIZE for a menu. Same as /nextgiveaway set
+uv run giveaway-cli giveaway next show                # what the next timer run will use, if chosen
+uv run giveaway-cli giveaway next clear               # back to a random pick
 uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
 uv run giveaway-cli giveaway winners <id>             # winners + their actual codes for one giveaway, CLI-only
 

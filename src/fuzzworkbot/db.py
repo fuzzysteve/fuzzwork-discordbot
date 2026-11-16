@@ -115,6 +115,30 @@ class GiveawayWinner(Base):
     giveaway: Mapped["Giveaway"] = relationship()
 
 
+# NextGiveaway.id is always this — the table holds at most one row.
+NEXT_GIVEAWAY_ID = 1
+
+
+class NextGiveaway(Base):
+    """Admin override for what the next `giveaway-cli giveaway random` run (the systemd
+    timer) creates, instead of picking a prize at random. Single-row table (id is always
+    NEXT_GIVEAWAY_ID); the random run deletes the row in the same transaction that
+    inserts the Giveaway it produced, so it's used exactly once. Setting it does not
+    reserve any codes — capacity is re-checked when the run actually uses it."""
+
+    __tablename__ = "next_giveaway"
+    __table_args__ = MYSQL_TABLE_ARGS
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    prize_id: Mapped[int] = mapped_column(ForeignKey("prizes.id"), nullable=False)
+    # Null = use whatever --winners the random run was invoked with.
+    winner_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    set_by_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    set_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+
+    prize: Mapped["Prize"] = relationship()
+
+
 class RoleReaction(Base):
     __tablename__ = "role_reactions"
     __table_args__ = (

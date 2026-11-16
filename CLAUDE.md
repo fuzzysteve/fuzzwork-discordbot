@@ -130,6 +130,13 @@ whoever (human or Claude) touches it next.
   promises more winners than the prize pool can actually cover once other still-running
   giveaways for the same prize are accounted for — don't add a new giveaway-creation
   path without reusing this same check.
+- `NextGiveaway` (`next_giveaway` table) is a single-row override (id is always
+  `NEXT_GIVEAWAY_ID`) for which prize the next `giveaway random` run uses. It's set via
+  `/nextgiveaway` or `giveaway-cli giveaway next`, both of which go through
+  `giveaway_logic.set_next_giveaway()`. Setting it reserves no codes. `giveaway random`
+  re-runs the usual lock-and-capacity check and deletes the row in the same transaction
+  that inserts the Giveaway. If the chosen prize can't run, it falls back to a random
+  pick and leaves the row in place for the next run.
 
 ## Secrets
 

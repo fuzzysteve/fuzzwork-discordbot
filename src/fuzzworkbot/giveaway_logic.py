@@ -1,7 +1,16 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from fuzzworkbot.db import STATUS_ACTIVE, STATUS_PENDING, Giveaway, GiveawayCode
+from fuzzworkbot.db import (
+    NEXT_GIVEAWAY_ID,
+    STATUS_ACTIVE,
+    STATUS_PENDING,
+    Giveaway,
+    GiveawayCode,
+    NextGiveaway,
+    Prize,
+    now_utc,
+)
 
 
 def unused_code_count(session: Session, prize_id: int) -> int:
@@ -36,3 +45,41 @@ def available_code_count(session: Session, prize_id: int) -> int:
     """Unused codes not already spoken for by a still-running giveaway for this prize.
     This is the number that's actually safe to promise to a *new* giveaway."""
     return unused_code_count(session, prize_id) - committed_winner_count(session, prize_id)
+
+
+def get_next_giveaway(session: Session) -> NextGiveaway | None:
+    return session.get(NextGiveaway, NEXT_GIVEAWAY_ID)
+
+
+def set_next_giveaway(
+    session: Session, prize: Prize, winner_count: int | None, set_by_discord_id: int | None = None
+) -> str | None:
+    """Make `prize` the next random giveaway, replacing any existing choice. Returns an
+    error message (and changes nothing) if the prize couldn't cover it right now;
+    otherwise None. Must be called inside a write transaction. Shared by the CLI and
+    /nextgiveaway so both apply the same rule."""
+    if not prize.active:
+        return f"'{prize.name}' is inactive."
+    needed = winner_count or 1
+    available = available_code_count(session, prize.id)
+    if needed > available:
+        return f"'{prize.name}' only has {available} code(s) available right now, not {needed}."
+
+    row = get_next_giveaway(session)
+    if row is None:
+        row = NextGiveaway(id=NEXT_GIVEAWAY_ID)
+        session.add(row)
+    row.prize_id = prize.id
+    row.winner_count = winner_count
+    row.set_by_discord_id = set_by_discord_id
+    row.set_at = now_utc()
+    return None
+
+
+def clear_next_giveaway(session: Session) -> bool:
+    """Remove the next-giveaway choice. Returns whether there was one."""
+    row = get_next_giveaway(session)
+    if row is None:
+        return False
+    session.delete(row)
+    return True
