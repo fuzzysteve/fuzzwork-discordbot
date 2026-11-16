@@ -1,0 +1,8 @@
+# Only index.php, callback.php and callback2.php are meant to be reachable. The real
+# enforcement is a <LocationMatch> in the Apache vhost (see README) — this file can't
+# cover *.php, which ProxyPassMatch sends to PHP-FPM without reading .htaccess. This is
+# a second layer for the non-PHP files only.
+<FilesMatch "^(\..*|composer\.(json|lock)|README\.md|db\.inc\.php|session\.inc\.php|secret\.php.*)$">
+    Require all denied
+</FilesMatch>
+RedirectMatch 404 ^/discord-auth/vendor(/|$)

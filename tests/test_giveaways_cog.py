@@ -224,7 +224,7 @@ async def test_finish_dm_forbidden_still_assigns_code(cog, channel, session_fact
 
     [row] = _winners(session_factory, giveaway_id)
     assert row.code_id is not None
-    assert "DMs closed" in channel.send.call_args.kwargs["embed"].description
+    assert "couldn't DM you" in channel.send.call_args.kwargs["embed"].description
 
 
 async def test_finish_out_of_codes_records_winner_without_code(cog, channel, session_factory, make_prize, make_giveaway):
@@ -290,3 +290,64 @@ async def test_nextgiveaway_set_rejects_over_capacity(cog, session_factory, make
     assert "Not set" in inter.response.send_message.call_args.args[0]
     with session_factory() as session:
         assert session.scalar(select(NextGiveaway)) is None
+
+
+# --- poller resilience -----------------------------------------------------------
+
+
+async def test_poll_survives_step_failures(cog, monkeypatch):
+    finish = AsyncMock()
+    monkeypatch.setattr(cog, "_post_pending", AsyncMock(side_effect=RuntimeError("MySQL went away")))
+    monkeypatch.setattr(cog, "_finish_active", finish)
+
+    await cog.poll.coro(cog)  # must not raise, or tasks.loop stops for good
+
+    finish.assert_awaited_once()
+
+
+async def test_one_failing_giveaway_does_not_block_others(cog, make_prize, make_giveaway, monkeypatch):
+    prize_id = make_prize(codes=["A", "B"])
+    first = make_giveaway(prize_id, status=STATUS_ACTIVE, message_id=1, ends_at=minutes_ago(2))
+    second = make_giveaway(prize_id, status=STATUS_ACTIVE, message_id=2, ends_at=minutes_ago(1))
+    attempted = []
+
+    async def finish(giveaway_id):
+        attempted.append(giveaway_id)
+        if giveaway_id == first:
+            raise http_error(disnake.HTTPException, 500)
+
+    monkeypatch.setattr(cog, "_finish_one", finish)
+    await cog._finish_active()
+    assert sorted(attempted) == sorted([first, second])
+
+
+async def test_finish_announcement_failure_keeps_draw_committed(cog, channel, session_factory, make_prize, make_giveaway):
+    # The DM with the code has already gone out by the time the announcement fails —
+    # the draw must stay committed, or the retry would hand the same code to someone else.
+    channel.send.side_effect = http_error(disnake.HTTPException, 500)
+    winner = fake_user(10)
+
+    giveaway_id = await _finish_with(cog, channel, make_prize, make_giveaway, [winner])
+
+    assert _get(session_factory, giveaway_id).status == STATUS_FINISHED
+    [row] = _winners(session_factory, giveaway_id)
+    with session_factory() as session:
+        code = session.get(GiveawayCode, row.code_id)
+    assert code.assigned_to_discord_id == 10
+    assert code.code in winner.send.call_args.args[0]
+
+    channel.send.reset_mock()
+    await cog._finish_one(giveaway_id)  # a retry is a no-op: no second draw
+    assert len(_winners(session_factory, giveaway_id)) == 1
+    channel.send.assert_not_called()
+
+
+async def test_finish_dm_server_error_still_finishes(cog, channel, session_factory, make_prize, make_giveaway):
+    first, second = fake_user(10), fake_user(11)
+    first.send.side_effect = http_error(disnake.HTTPException, 500)
+
+    giveaway_id = await _finish_with(cog, channel, make_prize, make_giveaway, [first, second], winner_count=2)
+
+    assert len(_winners(session_factory, giveaway_id)) == 2
+    second.send.assert_awaited_once()
+    assert "couldn't DM you" in channel.send.call_args.kwargs["embed"].description

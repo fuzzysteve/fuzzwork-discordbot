@@ -140,8 +140,15 @@ class Giveaways(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def poll(self):
-        await self._post_pending()
-        await self._finish_active()
+        # disnake's tasks.loop only survives network-level errors — anything else
+        # (a MySQL disconnect, a Discord 403/5xx) ends the loop for good while the bot
+        # itself stays up. That happened in Nov 2026 and stalled every giveaway for
+        # ~2.5 days, so nothing is allowed to escape from here.
+        for step in (self._post_pending, self._finish_active):
+            try:
+                await step()
+            except Exception:
+                logger.exception("Giveaway poller step %s failed; retrying next minute", step.__name__)
 
     @poll.before_loop
     async def before_poll(self):
@@ -152,7 +159,10 @@ class Giveaways(commands.Cog):
             pending_ids = session.scalars(select(Giveaway.id).where(Giveaway.status == STATUS_PENDING)).all()
 
         for giveaway_id in pending_ids:
-            await self._post_one(giveaway_id)
+            try:
+                await self._post_one(giveaway_id)
+            except Exception:
+                logger.exception("Posting giveaway %s failed; will retry", giveaway_id)
 
     async def _post_one(self, giveaway_id: int):
         with self.bot.session_factory.begin() as session:
@@ -190,100 +200,117 @@ class Giveaways(commands.Cog):
             ).all()
 
         for giveaway_id in ended_ids:
-            await self._finish_one(giveaway_id)
+            try:
+                await self._finish_one(giveaway_id)
+            except Exception:
+                logger.exception("Finishing giveaway %s failed; will retry", giveaway_id)
+
+    def _mark_finished(self, giveaway_id: int):
+        with self.bot.session_factory.begin() as session:
+            giveaway = session.get(Giveaway, giveaway_id)
+            if giveaway is not None:
+                giveaway.status = STATUS_FINISHED
 
     async def _finish_one(self, giveaway_id: int):
-        with self.bot.session_factory.begin() as session:
+        """Three phases, so a Discord failure can never undo (or repeat) a draw whose
+        codes have already been DMed: (1) gather entrants from Discord with no DB
+        transaction open; (2) draw winners, claim codes and mark the giveaway finished
+        in one committed transaction; (3) only then DM winners and announce. A failure
+        in phase 3 is logged, never retried — the winners and codes are already on
+        record for `giveaway-cli giveaway winners`."""
+        # Phase 1: read state, talk to Discord, no locks held.
+        with self.bot.session_factory() as session:
             giveaway = session.get(Giveaway, giveaway_id)
             if giveaway is None or giveaway.status != STATUS_ACTIVE:
                 return
-            prize = session.get(Prize, giveaway.prize_id)
+            guild_id, channel_id, message_id = giveaway.guild_id, giveaway.channel_id, giveaway.message_id
+            prize_name = session.get(Prize, giveaway.prize_id).name
 
-            guild = self.bot.get_guild(giveaway.guild_id)
-            channel = (guild.get_channel(giveaway.channel_id) if guild else None) or self.bot.get_channel(
-                giveaway.channel_id
-            )
-            if channel is None:
-                logger.warning("Channel missing for giveaway %s", giveaway.id)
-                giveaway.status = STATUS_FINISHED
+        guild = self.bot.get_guild(guild_id)
+        channel = (guild.get_channel(channel_id) if guild else None) or self.bot.get_channel(channel_id)
+        if channel is None:
+            logger.warning("Channel missing for giveaway %s", giveaway_id)
+            self._mark_finished(giveaway_id)
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except disnake.NotFound:
+            logger.warning("Giveaway message %s missing", message_id)
+            self._mark_finished(giveaway_id)
+            return
+
+        entrants: dict[int, disnake.User] = {}
+        for reaction in message.reactions:
+            async for user in reaction.users():
+                if not user.bot:
+                    entrants[user.id] = user
+
+        # Phase 2: the draw, committed before anyone is told anything.
+        awards: list[tuple[disnake.User, str | None]] = []
+        with self.bot.session_factory.begin() as session:
+            giveaway = session.scalar(select(Giveaway).where(Giveaway.id == giveaway_id).with_for_update())
+            if giveaway is None or giveaway.status != STATUS_ACTIVE:
                 return
-
-            try:
-                message = await channel.fetch_message(giveaway.message_id)
-            except disnake.NotFound:
-                logger.warning("Giveaway message %s missing", giveaway.message_id)
-                giveaway.status = STATUS_FINISHED
-                return
-
-            entrants: dict[int, disnake.User] = {}
-            for reaction in message.reactions:
-                async for user in reaction.users():
-                    if not user.bot:
-                        entrants[user.id] = user
-
-            if not entrants:
-                await channel.send(
-                    embed=disnake.Embed(
-                        title="Giveaway Ended",
-                        description=f"No one entered the giveaway for **{prize.name}**.",
-                    )
-                )
-                giveaway.status = STATUS_FINISHED
-                return
-
-            pool = list(entrants.values())
-            num_winners = min(giveaway.winner_count, len(pool))
-            winners = random.sample(pool, num_winners)
-
-            winner_lines = []
-            for winner in winners:
+            winner_count = giveaway.winner_count
+            for winner in random.sample(list(entrants.values()), min(winner_count, len(entrants))):
                 code_row = session.scalar(
                     select(GiveawayCode)
-                    .where(
-                        GiveawayCode.prize_id == giveaway.prize_id,
-                        GiveawayCode.assigned_at.is_(None),
-                    )
+                    .where(GiveawayCode.prize_id == giveaway.prize_id, GiveawayCode.assigned_at.is_(None))
                     .with_for_update()
                     .limit(1)
                 )
-
                 if code_row is None:
-                    # Shouldn't happen — /creategiveaway and the CLI both check
-                    # capacity up front — but handled defensively regardless.
-                    logger.error("No unused code left for prize %s (giveaway %s)", prize.name, giveaway.id)
-                    session.add(GiveawayWinner(giveaway_id=giveaway.id, discord_id=winner.id, drawn_at=now_utc()))
-                    winner_lines.append(f"{winner.mention} — no code left! An admin needs to deliver one manually.")
+                    # Shouldn't happen — every creation path checks capacity up front —
+                    # but handled defensively regardless.
+                    logger.error("No unused code left for prize %s (giveaway %s)", prize_name, giveaway_id)
+                    session.add(GiveawayWinner(giveaway_id=giveaway_id, discord_id=winner.id, drawn_at=now_utc()))
+                    awards.append((winner, None))
                     continue
-
                 code_row.assigned_to_discord_id = winner.id
                 code_row.assigned_at = now_utc()
                 session.add(
-                    GiveawayWinner(
-                        giveaway_id=giveaway.id, discord_id=winner.id, code_id=code_row.id, drawn_at=now_utc()
-                    )
+                    GiveawayWinner(giveaway_id=giveaway_id, discord_id=winner.id, code_id=code_row.id, drawn_at=now_utc())
                 )
+                awards.append((winner, code_row.code))
+            giveaway.status = STATUS_FINISHED
 
+        # Phase 3: notify. Best effort only — see docstring.
+        if not awards:
+            embed = disnake.Embed(title="Giveaway Ended", description=f"No one entered the giveaway for **{prize_name}**.")
+        else:
+            winner_lines = []
+            for winner, code in awards:
+                if code is None:
+                    winner_lines.append(f"{winner.mention} — no code left! An admin needs to deliver one manually.")
+                    continue
                 try:
-                    await winner.send(f"You won **{prize.name}**! Your code: `{code_row.code}`")
-                    winner_lines.append(f"{winner.mention}")
-                except disnake.Forbidden:
-                    logger.warning("Could not DM winner %s, code held for manual delivery", winner.id)
-                    winner_lines.append(f"{winner.mention} (DMs closed — an admin needs to deliver the code manually)")
+                    await winner.send(f"You won **{prize_name}**! Your code: `{code}`")
+                    winner_lines.append(winner.mention)
+                except disnake.HTTPException as e:
+                    logger.warning("Could not DM winner %s (giveaway %s): %s", winner.id, giveaway_id, e)
+                    winner_lines.append(f"{winner.mention} (couldn't DM you — an admin needs to deliver the code manually)")
 
             embed = disnake.Embed(
-                title="Giveaway Winner!" if num_winners == 1 else "Giveaway Winners!",
+                title="Giveaway Winner!" if len(awards) == 1 else "Giveaway Winners!",
                 description="\n".join(winner_lines),
             )
-            embed.add_field(name="Prize", value=prize.name, inline=False)
-            if num_winners < giveaway.winner_count:
+            embed.add_field(name="Prize", value=prize_name, inline=False)
+            if len(awards) < winner_count:
                 embed.add_field(
                     name="Note",
-                    value=f"Only {len(pool)} entrant(s) for {giveaway.winner_count} requested winner(s).",
+                    value=f"Only {len(entrants)} entrant(s) for {winner_count} requested winner(s).",
                     inline=False,
                 )
+        try:
             await channel.send(embed=embed)
-
-            giveaway.status = STATUS_FINISHED
+        except disnake.HTTPException:
+            logger.exception(
+                "Giveaway %s was drawn but the announcement failed to post — winners/codes are "
+                "recorded, see `giveaway-cli giveaway winners %s`",
+                giveaway_id,
+                giveaway_id,
+            )
 
 
 def setup(bot: commands.InteractionBot):

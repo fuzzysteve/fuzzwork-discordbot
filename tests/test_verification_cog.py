@@ -34,7 +34,8 @@ def esi(monkeypatch):
 
 
 def _reply(inter):
-    return inter.response.send_message.call_args.args[0]
+    inter.response.defer.assert_awaited_once()
+    return inter.edit_original_response.call_args.args[0]
 
 
 def test_lookup_eveid(cog, linked):
@@ -61,6 +62,18 @@ async def test_authme_grants_role_and_sets_nick(cog, linked, esi):
     inter.author.add_roles.assert_awaited_once_with(role)
     inter.author.edit.assert_awaited_once_with(nick="Steve Ronuken")
     assert _reply(inter) == "You are Steve Ronuken in Eve"
+
+
+async def test_authme_truncates_long_names_to_discord_nick_limit(cog, linked, monkeypatch):
+    long_name = "A" * 37  # EVE's max character-name length
+    monkeypatch.setattr(verification, "get_character_name", lambda eve_id, user_agent: long_name)
+    inter = fake_interaction(author_id=42)
+    inter.guild.get_role.return_value = SimpleNamespace(id=2000)
+
+    await cog.authme.callback(cog, inter)
+
+    inter.author.edit.assert_awaited_once_with(nick="A" * 32)
+    assert _reply(inter) == f"You are {long_name} in Eve"
 
 
 async def test_authme_still_replies_when_role_change_forbidden(cog, linked, esi):

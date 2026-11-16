@@ -130,6 +130,15 @@ whoever (human or Claude) touches it next.
   promises more winners than the prize pool can actually cover once other still-running
   giveaways for the same prize are accounted for — don't add a new giveaway-creation
   path without reusing this same check.
+- The giveaway poller (`cogs/giveaways.py` `poll`) must never let an exception escape:
+  disnake's `tasks.loop` only survives network-level errors, and anything else (a
+  MySQL 2013 disconnect, a Discord 403/5xx) ends the loop for good while the bot looks
+  healthy. That happened twice in Nov 2026 (one outage lasted ~2.5 days). Each step and
+  each giveaway is wrapped in try/except, and both engines use `pool_pre_ping=True`.
+- `_finish_one` commits the draw (winners, code claims, `STATUS_FINISHED`) *before* any
+  DM or announcement is sent. Never move a Discord send back inside that transaction: a
+  later failure would roll back code claims for DMs that already went out, and the
+  retry would hand the same code to someone else.
 - `NextGiveaway` (`next_giveaway` table) is a single-row override (id is always
   `NEXT_GIVEAWAY_ID`) for which prize the next `giveaway random` run uses. It's set via
   `/nextgiveaway` or `giveaway-cli giveaway next`, both of which go through

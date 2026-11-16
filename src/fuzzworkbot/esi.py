@@ -23,9 +23,13 @@ def get_session(user_agent: str) -> CachedSession:
     return _session
 
 
+ESI_TIMEOUT_SECONDS = 10
+
+
 def get_character_name(eve_id: int, user_agent: str) -> str:
+    """Blocking — call it via asyncio.to_thread from async code."""
     session = get_session(user_agent)
     url = f"https://esi.evetech.net/latest/characters/{eve_id}/?datasource=tranquility"
-    response = session.get(url)
+    response = session.get(url, timeout=ESI_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()["name"]

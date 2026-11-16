@@ -118,6 +118,8 @@ def fake_interaction(author_id=42, guild_id=1000, channel_id=3000):
     inter.guild_id = guild_id
     inter.channel_id = channel_id
     inter.response.send_message = AsyncMock()
+    inter.response.defer = AsyncMock()
+    inter.edit_original_response = AsyncMock()
     return inter
 
 

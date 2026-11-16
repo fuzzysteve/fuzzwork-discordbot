@@ -33,6 +33,11 @@ already know who you are." and exits) rather than overwriting the existing chara
 ## Files
 
 - `index.php`, `callback.php`, `callback2.php` — the flow above.
+- `session.inc.php` — shared `session_start()` for all three: own cookie name/path,
+  `Secure`/`HttpOnly`/`SameSite=Lax` (Lax, not Strict — the SSO redirects back are
+  cross-site GETs), `use_strict_mode`. `callback.php` also regenerates the session ID
+  once the EVE character is known (anti session-fixation).
+- `.htaccess` — denies the non-PHP files (Composer metadata, `vendor/`, this README).
 - `db.inc.php` — opens the PDO connection to the `discordbot` database.
 - `secret.php` — **not committed** (gitignored), holds `$eve_clientid`/`$eve_secret`,
   `$discord_clientid`/`$discord_secret`, and `$db_password`. Every other file
@@ -69,3 +74,18 @@ If any of these secrets were ever exposed in plaintext (they were, in earlier ve
 of these files, which is why they're external now), rotate them via the respective
 developer portal and MySQL, then update `secret.php` — don't just copy the old values
 back in.
+
+## Only the three entry points are public
+
+Everything except `index.php`, `callback.php` and `callback2.php` is denied by a
+`<LocationMatch "^/discord-auth/...">` block in the live Apache vhost
+(`/etc/apache2/sites-available/fuzzwork.conf`, just above the `.php` `ProxyPassMatch`).
+It has to live there, not in `.htaccess`: that `ProxyPassMatch` hands every `*.php`
+URL straight to PHP-FPM, and Apache never reads `.htaccess` for proxied requests, so
+`.htaccess` alone left `secret.php`, `db.inc.php` and `vendor/*.php` reachable (they
+printed nothing, but shouldn't run on request at all). If you add a new public entry
+point, add it to that regex too.
+
+`secret.php` on the live copy is `root:www-data`, mode 640 — readable by PHP-FPM
+(www-data), not by other local users, and not writable by the web process.
+

@@ -1,5 +1,5 @@
 <?php
-session_start();
+require __DIR__ . '/session.inc.php';
 
 function auth_error($error_message)
 {
@@ -51,6 +51,9 @@ $charactername=$jwtexplode->name;
 $owner=$jwtexplode->owner;
 $characterid=explode(":",$jwtexplode->sub)[2];
 
+// New session ID once the EVE identity is known, so an ID anyone saw before login
+// (or planted) is worthless afterwards.
+session_regenerate_id(true);
 $_SESSION['characterid']=$characterid;
 $_SESSION['charactername']=$charactername;
 

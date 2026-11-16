@@ -41,7 +41,7 @@ _engine: Engine | None = None
 def get_engine(sde_database_url: str) -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(sde_database_url, pool_recycle=3600)
+        _engine = create_engine(sde_database_url, pool_recycle=3600, pool_pre_ping=True)
     return _engine
 
 

@@ -1,6 +1,6 @@
 <?php
 
-session_start();
+require __DIR__ . '/session.inc.php';
 
 require __DIR__ . '/secret.php';
 

@@ -162,6 +162,9 @@ def make_session_factory(database_url: str) -> sessionmaker[Session]:
         # which (like latin1) can't hold 4-byte characters such as most emoji.
         connect_args["charset"] = "utf8mb4"
 
-    engine = create_engine(database_url, pool_recycle=3600, connect_args=connect_args)
+    # pool_pre_ping: a pooled connection MySQL has dropped (server restart, 2013 "Lost
+    # connection") is detected and replaced on checkout instead of failing the first
+    # query on it — that failure is what killed the giveaway poller in Nov 2026.
+    engine = create_engine(database_url, pool_recycle=3600, pool_pre_ping=True, connect_args=connect_args)
     Base.metadata.create_all(engine)
     return sessionmaker(engine, expire_on_commit=False)
