@@ -22,7 +22,11 @@ whoever (human or Claude) touches it next.
   - `giveaway_logic.py` — shared capacity-check helpers (`unused_code_count`,
     `committed_winner_count`, `available_code_count`) used by both `cogs/giveaways.py`
     and `fuzzworkbot_cli/cli.py` so the two entry points can't diverge on the rule for
-    "how many codes can this prize still promise."
+    "how many codes can this prize still promise." Also `parse_start_time()` for
+    scheduled giveaways and the giveaway-queue helpers.
+  - `code_import.py` — code-file parsing and import (`parse_code_csv`,
+    `parse_code_lines`, `import_codes`), shared by `giveaway-cli codes load|import-csv`
+    and `/prize import` for the same reason.
   - `esi.py` — ESI character-name lookup via a `requests_cache.CachedSession`.
   - `sde.py` — read-only lookups against Fuzzwork's own **separate** live EVE SDE MySQL
     database (`eve` schema, `config.sde_database_url`) — item/ship types and the
@@ -104,8 +108,12 @@ whoever (human or Claude) touches it next.
   - Don't add a socket/HTTP bridge between the CLI and the bot for this — the DB-poll
     pattern is deliberate and keeps the CLI usable without the bot process being up.
 - `Giveaway.status` is a plain `String` column with constants (`STATUS_PENDING` etc. in
-  `db.py`), not a DB enum type — keep it that way for a 3-value field, avoids MySQL enum
-  migration friction.
+  `db.py`), not a DB enum type — keep it that way for a 4-value field (pending, active,
+  finished, cancelled), avoids MySQL enum migration friction. A *scheduled* giveaway
+  isn't a separate status: it's `pending` with a future `starts_at`, which
+  `_post_pending` skips until it arrives (`_post_one` then overwrites `starts_at` with the
+  real post time). It reserves its codes from creation, like any pending giveaway.
+  `cancelled` is excluded from `committed_winner_count`, so cancelling frees the codes.
 - A giveaway can have multiple winners (`Giveaway.winner_count`); each actual winner is
   a row in `GiveawayWinner` (giveaway_id, discord_id, code_id, drawn_at), not a column
   on `Giveaway` — the original design had `winner_discord_id`/`code_id` directly on

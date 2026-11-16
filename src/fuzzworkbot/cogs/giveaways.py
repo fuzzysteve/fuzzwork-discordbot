@@ -6,14 +6,16 @@ import random
 import disnake
 from disnake import OptionChoice
 from disnake.ext import commands, tasks
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from fuzzworkbot.config import load_config
 from fuzzworkbot import watchdog
+from fuzzworkbot.code_import import CodeFileError, import_codes, parse_code_csv, parse_code_lines
+from fuzzworkbot.config import load_config
 from fuzzworkbot.db import (
     ENTRY_BUTTON,
     STATUS_ACTIVE,
+    STATUS_CANCELLED,
     STATUS_FINISHED,
     STATUS_PENDING,
     Giveaway,
@@ -26,8 +28,11 @@ from fuzzworkbot.db import (
 from fuzzworkbot.giveaway_logic import (
     available_code_count,
     clear_giveaway_queue,
+    committed_winner_count,
+    unused_code_count,
     describe_queued,
     giveaway_queue,
+    parse_start_time,
     queue_giveaway,
     remove_queued_giveaway,
 )
@@ -60,6 +65,33 @@ async def autocomplete_queue(inter: disnake.ApplicationCommandInteraction, user_
     return [OptionChoice(name=label, value=str(queue_id)) for label, queue_id in labels if user_input.lower() in label.lower()][:25]
 
 
+async def autocomplete_open_giveaways(inter: disnake.ApplicationCommandInteraction, user_input: str) -> list[OptionChoice]:
+    """Pending (including scheduled) and active giveaways, newest first."""
+    with inter.bot.session_factory() as session:
+        rows = session.execute(
+            select(Giveaway.id, Giveaway.status, Giveaway.starts_at, Giveaway.ends_at, Prize.name)
+            .join(Prize, Prize.id == Giveaway.prize_id)
+            .where(Giveaway.status.in_((STATUS_PENDING, STATUS_ACTIVE)))
+            .order_by(Giveaway.id.desc())
+        ).all()
+    choices = []
+    for row in rows:
+        g = row._mapping
+        if g["status"] == STATUS_ACTIVE:
+            when = f"running, ends {g['ends_at']:%Y-%m-%d %H:%M} UTC"
+        elif g["starts_at"] is not None:
+            when = f"scheduled for {g['starts_at']:%Y-%m-%d %H:%M} UTC"
+        else:
+            when = "about to post"
+        label = f"#{g['id']} {g['name']} ({when})"[:100]
+        if user_input.lower() in label.lower():
+            choices.append(OptionChoice(name=label, value=str(g["id"])))
+    return choices[:25]
+
+
+# Code files are text; this is ~10k long codes, far beyond any real batch.
+MAX_IMPORT_BYTES = 1024 * 1024
+
 # custom_id of a giveaway's Enter button is ENTER_PREFIX + giveaway id. Handled by the
 # on_button_click listener rather than a registered View, so buttons on messages posted
 # before a restart keep working with no extra setup.
@@ -72,11 +104,19 @@ def _discord_timestamp(dt: datetime.datetime, style: str) -> str:
 
 
 def giveaway_embed(
-    prize_name: str, winner_count: int, ends_at: datetime.datetime, entrants: int | None, *, ended: bool = False
+    prize_name: str,
+    winner_count: int,
+    ends_at: datetime.datetime,
+    entrants: int | None,
+    *,
+    ended: bool = False,
+    cancelled: bool = False,
 ) -> disnake.Embed:
     """The giveaway post. `entrants` is None for old reaction-entry giveaways, which have
     no stored count."""
-    if ended:
+    if cancelled:
+        description = "This giveaway was cancelled. No winners will be drawn."
+    elif ended:
         description = "This giveaway has ended."
     elif entrants is None:
         description = "This is a giveaway! React with any reaction to win the prize!"
@@ -87,19 +127,18 @@ def giveaway_embed(
     embed.add_field(name="Winners", value=str(winner_count), inline=True)
     if entrants is not None:
         embed.add_field(name="Entrants", value=str(entrants), inline=True)
-    ends = "Ended" if ended else "Ends"
     embed.add_field(
-        name=ends,
+        name="Was due to end" if cancelled else "Ended" if ended else "Ends",
         value=f"{_discord_timestamp(ends_at, 'R')} ({_discord_timestamp(ends_at, 'f')})",
         inline=False,
     )
     return embed
 
 
-def enter_button(giveaway_id: int, *, disabled: bool = False) -> disnake.ui.Button:
+def enter_button(giveaway_id: int, *, disabled: bool = False, label: str | None = None) -> disnake.ui.Button:
     return disnake.ui.Button(
         style=disnake.ButtonStyle.success,
-        label="Giveaway ended" if disabled else "Enter giveaway",
+        label=label or ("Giveaway ended" if disabled else "Enter giveaway"),
         emoji="🎉",
         custom_id=f"{ENTER_PREFIX}{giveaway_id}",
         disabled=disabled,
@@ -130,7 +169,18 @@ class Giveaways(commands.Cog):
         duration_hours: int = commands.Param(gt=0),
         winners: int = commands.Param(default=1, gt=0),
         channel: disnake.TextChannel = commands.Param(default=None),
+        start_at: str = commands.Param(
+            default=None,
+            description="Schedule it: YYYY-MM-DD HH:MM in EVE time (UTC). Omit to start now.",
+        ),
     ):
+        starts_at = None
+        if start_at:
+            starts_at = parse_start_time(start_at, now_utc())
+            if isinstance(starts_at, str):
+                await inter.response.send_message(starts_at, ephemeral=True)
+                return
+
         with self.bot.session_factory.begin() as session:
             # Lock the prize row so two concurrent /creategiveaway calls for the same
             # prize can't both read the same "available" number and both succeed.
@@ -159,13 +209,199 @@ class Giveaways(commands.Cog):
                 duration_hours=duration_hours,
                 winner_count=winners,
                 status=STATUS_PENDING,
+                # A future starts_at makes it a scheduled giveaway; _post_pending waits
+                # for it. Its codes are reserved from now, like any pending giveaway's.
+                starts_at=starts_at,
             )
             session.add(giveaway)
 
-        await inter.response.send_message(
-            f"Giveaway for '{prize}' ({winners} winner(s)) queued. It will post within about a minute.",
-            ephemeral=True,
+        if starts_at:
+            when = f"scheduled for {_discord_timestamp(starts_at, 'f')} ({_discord_timestamp(starts_at, 'R')})"
+        else:
+            when = "queued. It will post within about a minute"
+        await inter.response.send_message(f"Giveaway for '{prize}' ({winners} winner(s)) {when}.", ephemeral=True)
+
+    @commands.slash_command(
+        guild_ids=[_config.guild_id],
+        description="Manage running and scheduled giveaways.",
+        default_member_permissions=disnake.Permissions(manage_guild=True),
+    )
+    async def giveaway(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    @giveaway.sub_command(name="cancel", description="Cancel a scheduled or running giveaway. No winners are drawn.")
+    async def giveaway_cancel(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        giveaway: str = commands.Param(autocomplete=autocomplete_open_giveaways),
+    ):
+        await inter.response.defer(ephemeral=True)
+        if not giveaway.isdigit():
+            await inter.edit_original_response("Pick a giveaway from the list.")
+            return
+        giveaway_id = int(giveaway)
+        with self.bot.session_factory.begin() as session:
+            # Locked so this can't interleave with the poller drawing the same giveaway:
+            # _finish_one re-checks status under the same lock.
+            row = session.scalar(select(Giveaway).where(Giveaway.id == giveaway_id).with_for_update())
+            if row is None or row.status not in (STATUS_PENDING, STATUS_ACTIVE):
+                await inter.edit_original_response("That giveaway isn't scheduled or running any more.")
+                return
+            was_posted = row.status == STATUS_ACTIVE
+            row.status = STATUS_CANCELLED
+            prize_name = session.get(Prize, row.prize_id).name
+            post = (row.channel_id, row.message_id, row.winner_count, row.ends_at, row.entry_mode == ENTRY_BUTTON)
+            entrants = session.scalar(select(func.count(GiveawayEntry.id)).where(GiveawayEntry.giveaway_id == giveaway_id))
+            freed = row.winner_count
+
+        self._shown_entrants.pop(giveaway_id, None)
+        if was_posted:
+            channel_id, message_id, winner_count, ends_at, uses_button = post
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if channel is not None:
+                    await channel.get_partial_message(message_id).edit(
+                        embed=giveaway_embed(
+                            prize_name, winner_count, ends_at, entrants if uses_button else None, cancelled=True
+                        ),
+                        components=[enter_button(giveaway_id, disabled=True, label="Giveaway cancelled")]
+                        if uses_button
+                        else [],
+                    )
+            except Exception:
+                logger.exception("Cancelled giveaway %s but couldn't update its post", giveaway_id)
+        await inter.edit_original_response(
+            f"Cancelled giveaway #{giveaway_id} ({prize_name}). Its {freed} reserved code(s) are available again."
         )
+
+    @giveaway.sub_command(name="endnow", description="End a running giveaway now and draw its winners.")
+    async def giveaway_endnow(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        giveaway: str = commands.Param(autocomplete=autocomplete_open_giveaways),
+    ):
+        await inter.response.defer(ephemeral=True)
+        if not giveaway.isdigit():
+            await inter.edit_original_response("Pick a giveaway from the list.")
+            return
+        giveaway_id = int(giveaway)
+        with self.bot.session_factory.begin() as session:
+            row = session.scalar(select(Giveaway).where(Giveaway.id == giveaway_id).with_for_update())
+            if row is None or row.status not in (STATUS_PENDING, STATUS_ACTIVE):
+                await inter.edit_original_response("That giveaway isn't running any more.")
+                return
+            if row.status == STATUS_PENDING:
+                await inter.edit_original_response(
+                    "That giveaway hasn't been posted yet, so there's nobody to draw. Use `/giveaway cancel` instead."
+                )
+                return
+            # Past ends_at, so even if the draw below fails the poller finishes it within a minute.
+            row.ends_at = now_utc()
+        try:
+            await self._finish_one(giveaway_id)
+        except Exception:
+            logger.exception("endnow: finishing giveaway %s failed; the poller will retry", giveaway_id)
+            await inter.edit_original_response("Ended, but the draw hit an error. The bot will retry within a minute.")
+            return
+        await inter.edit_original_response(f"Giveaway #{giveaway_id} ended and its winners were drawn and announced.")
+
+    @commands.slash_command(
+        guild_ids=[_config.guild_id],
+        description="Giveaway prizes and their codes.",
+        default_member_permissions=disnake.Permissions(manage_guild=True),
+    )
+    async def prize(self, inter: disnake.ApplicationCommandInteraction):
+        pass
+
+    @prize.sub_command(name="list", description="Every prize with its unused, available and reserved code counts.")
+    async def prize_list(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        show_empty: bool = commands.Param(default=False, description="Also list prizes with no codes left."),
+    ):
+        with self.bot.session_factory() as session:
+            prizes = session.scalars(select(Prize).order_by(Prize.active.desc(), Prize.name)).all()
+            rows = [
+                (p.name, p.active, unused_code_count(session, p.id), committed_winner_count(session, p.id))
+                for p in prizes
+            ]
+        if not rows:
+            await inter.response.send_message("No prizes yet. Add codes with `/prize import`.", ephemeral=True)
+            return
+        # A prize with unused codes all reserved by running giveaways isn't empty: it's
+        # only hidden once every code has actually been handed out.
+        shown = rows if show_empty else [r for r in rows if r[2] > 0]
+        hidden = len(rows) - len(shown)
+        lines = []
+        for name, active, unused, reserved in shown:
+            available = unused - reserved
+            status = "" if active else " *(inactive)*"
+            detail = f"{available} available" + (f", {reserved} reserved by giveaways" if reserved else "")
+            lines.append(f"**{name}**{status} — {detail}")
+        if not lines:
+            lines.append("Every prize is out of codes. Add more with `/prize import`.")
+        text = "\n".join(lines)
+        footer = f"\n*{hidden} prize(s) with no codes left hidden; use `show_empty` to see them.*" if hidden else ""
+        if len(text) + len(footer) > 2000:
+            text = text[: 1980 - len(footer)] + "\n…(truncated)"
+        await inter.response.send_message(text + footer, ephemeral=True)
+
+    @prize.sub_command(
+        name="import",
+        description="Add codes from a file: a CSV with prize,code columns, or one code per line for one prize.",
+    )
+    async def prize_import(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        file: disnake.Attachment,
+        prize: str = commands.Param(
+            default=None,
+            description="For a plain one-code-per-line file: the prize to add them to. Leave empty for a CSV.",
+        ),
+    ):
+        # Private reply, and codes are never echoed back. The upload itself sits on
+        # Discord's CDN behind an expiring link only this interaction knows.
+        await inter.response.defer(ephemeral=True)
+        if file.size > MAX_IMPORT_BYTES:
+            await inter.edit_original_response(f"That file is too big (limit {MAX_IMPORT_BYTES // 1024} KB).")
+            return
+        try:
+            text = (await file.read()).decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await inter.edit_original_response("That file isn't UTF-8 text. Save it as CSV (UTF-8) or plain text.")
+            return
+        except disnake.HTTPException:
+            await inter.edit_original_response("Couldn't download the file from Discord. Try again.")
+            return
+
+        try:
+            if prize:
+                codes = parse_code_lines(text)
+                rows = [(prize, code) for code in codes]
+                skipped_given = None
+            else:
+                parsed = parse_code_csv(text)
+                rows = parsed.rows
+                skipped_given = parsed.skipped_given if parsed.has_given_column else None
+            if not rows:
+                await inter.edit_original_response("No codes found in that file.")
+                return
+            with self.bot.session_factory.begin() as session:
+                # A named prize must already exist; a CSV may create new ones, like the CLI.
+                result = import_codes(session, rows, create_missing_prizes=not prize)
+        except CodeFileError as e:
+            await inter.edit_original_response(str(e))
+            return
+
+        parts = [f"Imported {result.added} code(s) into {len(result.prize_names)} prize(s)."]
+        if result.created_prizes:
+            parts.append(f"New prize(s): {', '.join(result.created_prizes)}.")
+        if result.skipped_duplicates:
+            parts.append(f"Skipped {result.skipped_duplicates} duplicate(s).")
+        if skipped_given:
+            parts.append(f"Skipped {skipped_given} row(s) marked as already given.")
+        logger.info("prize import by %s: %s", inter.author.id, " ".join(parts))
+        await inter.edit_original_response(" ".join(parts))
 
     @commands.slash_command(
         guild_ids=[_config.guild_id],
@@ -281,7 +517,13 @@ class Giveaways(commands.Cog):
 
     async def _post_pending(self):
         with self.bot.session_factory() as session:
-            pending_ids = session.scalars(select(Giveaway.id).where(Giveaway.status == STATUS_PENDING)).all()
+            # A pending giveaway with a future starts_at is scheduled: leave it until then.
+            pending_ids = session.scalars(
+                select(Giveaway.id).where(
+                    Giveaway.status == STATUS_PENDING,
+                    or_(Giveaway.starts_at.is_(None), Giveaway.starts_at <= now_utc()),
+                )
+            ).all()
 
         for giveaway_id in pending_ids:
             try:

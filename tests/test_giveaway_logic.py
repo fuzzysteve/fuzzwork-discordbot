@@ -50,3 +50,33 @@ def test_available_subtracts_running_giveaways(session_factory, make_prize, make
     make_giveaway(prize_id, status=STATUS_FINISHED, winner_count=2)
     with session_factory() as session:
         assert available_code_count(session, prize_id) == 3
+
+
+# --- parse_start_time ------------------------------------------------------------
+
+import datetime  # noqa: E402
+
+import pytest  # noqa: E402
+
+from fuzzworkbot.giveaway_logic import parse_start_time  # noqa: E402
+
+NOW = datetime.datetime(2026, 11, 16, 18, 0)
+
+
+def test_parse_start_time_accepts_future_utc():
+    assert parse_start_time(" 2026-11-21 18:00 ", NOW) == datetime.datetime(2026, 11, 21, 18, 0)
+
+
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ("tomorrow", "must look like"),
+        ("21/11/2026 18:00", "must look like"),
+        ("2026-11-16 18:00", "in the future"),
+        ("2026-11-16 17:00", "in the future"),
+        ("2027-03-01 00:00", "at most 90 days"),
+    ],
+)
+def test_parse_start_time_rejects(text, error):
+    result = parse_start_time(text, NOW)
+    assert isinstance(result, str) and error in result

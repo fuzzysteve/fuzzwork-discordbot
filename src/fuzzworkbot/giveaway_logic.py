@@ -1,3 +1,5 @@
+import datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -45,6 +47,27 @@ def available_code_count(session: Session, prize_id: int) -> int:
     This is the number that's actually safe to promise to a *new* giveaway."""
     return unused_code_count(session, prize_id) - committed_winner_count(session, prize_id)
 
+
+
+START_TIME_FORMAT = "%Y-%m-%d %H:%M"
+MAX_SCHEDULE_AHEAD = datetime.timedelta(days=90)
+
+
+def parse_start_time(text: str, now: datetime.datetime) -> datetime.datetime | str:
+    """A scheduled start for /creategiveaway or `giveaway create`: "YYYY-MM-DD HH:MM" in
+    EVE time (UTC), returned as a naive UTC datetime like every DATETIME column here.
+    Returns an error message instead if it's malformed, not in the future, or too far
+    ahead. A scheduled giveaway is just a pending row with a future starts_at; the
+    poller posts it once that time arrives."""
+    try:
+        start = datetime.datetime.strptime(text.strip(), START_TIME_FORMAT)
+    except ValueError:
+        return "Start time must look like 2026-11-21 18:00 (EVE time, which is UTC)."
+    if start <= now:
+        return "Start time must be in the future (EVE time, which is UTC)."
+    if start - now > MAX_SCHEDULE_AHEAD:
+        return f"Start time can be at most {MAX_SCHEDULE_AHEAD.days} days ahead."
+    return start
 
 
 def queued_winner_total(session: Session, prize_id: int) -> int:

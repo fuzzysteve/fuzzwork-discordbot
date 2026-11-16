@@ -78,6 +78,9 @@ class GiveawayCode(Base):
 STATUS_PENDING = "pending"
 STATUS_ACTIVE = "active"
 STATUS_FINISHED = "finished"
+# Stopped by an admin (/giveaway cancel) before it was drawn: no winners, and it no
+# longer counts toward committed_winner_count, so its codes are free again.
+STATUS_CANCELLED = "cancelled"
 
 # Giveaway.entry_mode values. Giveaways posted before the Enter button existed were
 # entered by reacting; the live column's server default keeps those rows "reaction".

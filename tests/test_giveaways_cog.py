@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 import disnake
 import pytest
 from conftest import fake_interaction, fake_reaction, fake_user, http_error, minutes_ago
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from fuzzworkbot.cogs import giveaways as giveaways_module
 from fuzzworkbot.cogs.giveaways import Giveaways, autocomplete_prizes
-from fuzzworkbot.db import STATUS_ACTIVE, STATUS_FINISHED, STATUS_PENDING, Giveaway, GiveawayCode, GiveawayWinner
+from fuzzworkbot.db import STATUS_ACTIVE, STATUS_FINISHED, STATUS_PENDING, Giveaway, GiveawayCode, GiveawayWinner, Prize
 
 
 def _channel(message=None):
@@ -50,9 +50,9 @@ def _winners(session_factory, giveaway_id):
 # --- /creategiveaway -------------------------------------------------------------
 
 
-async def _create(cog, inter, prize, winners=1, duration_hours=24, channel=None):
+async def _create(cog, inter, prize, winners=1, duration_hours=24, channel=None, start_at=None):
     await cog.creategiveaway.callback(
-        cog, inter, prize=prize, duration_hours=duration_hours, winners=winners, channel=channel
+        cog, inter, prize=prize, duration_hours=duration_hours, winners=winners, channel=channel, start_at=start_at
     )
 
 
@@ -492,3 +492,229 @@ async def test_poll_writes_heartbeat_only_when_healthy(cog, monkeypatch):
     monkeypatch.setattr(cog, "_finish_active", AsyncMock(side_effect=RuntimeError("DB down")))
     await cog.poll.coro(cog)
     assert watchdog.read_heartbeat() is None
+
+
+# --- scheduled start -------------------------------------------------------------
+
+
+async def test_create_scheduled_waits_for_start(cog, channel, session_factory, make_prize):
+    from fuzzworkbot.db import now_utc
+
+    make_prize(name="PLEX", codes=["A"])
+    start = now_utc() + datetime.timedelta(days=2)
+    inter = fake_interaction()
+
+    await _create(cog, inter, "PLEX", start_at=start.strftime("%Y-%m-%d %H:%M"))
+
+    assert "scheduled for <t:" in inter.response.send_message.call_args.args[0]
+    with session_factory() as session:
+        giveaway = session.scalar(select(Giveaway))
+    assert giveaway.status == STATUS_PENDING and giveaway.starts_at == start.replace(second=0, microsecond=0)
+
+    await cog._post_pending()
+    channel.send.assert_not_called()  # not yet
+
+    with session_factory.begin() as session:
+        session.get(Giveaway, giveaway.id).starts_at = minutes_ago(1)
+    await cog._post_pending()
+    channel.send.assert_awaited_once()
+    assert _get(session_factory, giveaway.id).status == STATUS_ACTIVE
+
+
+async def test_create_rejects_bad_start(cog, session_factory, make_prize):
+    make_prize(name="PLEX", codes=["A"])
+    inter = fake_interaction()
+    await _create(cog, inter, "PLEX", start_at="next tuesday")
+    assert "must look like" in inter.response.send_message.call_args.args[0]
+    with session_factory() as session:
+        assert session.scalar(select(Giveaway)) is None
+
+
+# --- /giveaway cancel | endnow ----------------------------------------------------
+
+
+def _deferred_reply(inter):
+    inter.response.defer.assert_awaited_once_with(ephemeral=True)
+    return inter.edit_original_response.call_args.args[0]
+
+
+async def test_cancel_scheduled_frees_its_codes(cog, session_factory, make_prize, make_giveaway):
+    from fuzzworkbot.db import STATUS_CANCELLED
+    from fuzzworkbot.giveaway_logic import available_code_count
+
+    prize_id = make_prize(codes=["A", "B"])
+    giveaway_id = make_giveaway(prize_id, winner_count=2, starts_at=minutes_ago(-600))
+    with session_factory() as session:
+        assert available_code_count(session, prize_id) == 0
+
+    inter = fake_interaction()
+    await cog.giveaway_cancel.callback(cog, inter, giveaway=str(giveaway_id))
+
+    assert "2 reserved code(s) are available again" in _deferred_reply(inter)
+    assert _get(session_factory, giveaway_id).status == STATUS_CANCELLED
+    with session_factory() as session:
+        assert available_code_count(session, prize_id) == 2
+
+
+async def test_cancel_running_button_giveaway_updates_post(cog, channel, session_factory, make_prize, make_giveaway):
+    from fuzzworkbot.db import STATUS_CANCELLED
+
+    giveaway_id = make_giveaway(
+        make_prize(name="PLEX", codes=["A"]), status=STATUS_ACTIVE, message_id=77, ends_at=minutes_ago(-60), entry_mode="button"
+    )
+    await cog.on_button_click(_click(giveaway_id))
+
+    await cog.giveaway_cancel.callback(cog, fake_interaction(), giveaway=str(giveaway_id))
+
+    edit = channel.get_partial_message.return_value.edit.call_args.kwargs
+    assert "cancelled" in edit["embed"].description
+    assert edit["components"][0].disabled and edit["components"][0].label == "Giveaway cancelled"
+    assert _get(session_factory, giveaway_id).status == STATUS_CANCELLED
+
+    # Clicks after cancelling are refused, and the poller never draws it.
+    late = _click(giveaway_id, author_id=11)
+    await cog.on_button_click(late)
+    assert "has ended" in late.response.send_message.call_args.args[0]
+    with session_factory.begin() as session:
+        session.get(Giveaway, giveaway_id).ends_at = minutes_ago(1)
+    await cog._finish_active()
+    assert _winners(session_factory, giveaway_id) == []
+
+
+async def test_cancel_refuses_finished(cog, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(make_prize(codes=["A"]), status=STATUS_FINISHED)
+    inter = fake_interaction()
+    await cog.giveaway_cancel.callback(cog, inter, giveaway=str(giveaway_id))
+    assert "isn't scheduled or running" in _deferred_reply(inter)
+    assert _get(session_factory, giveaway_id).status == STATUS_FINISHED
+
+
+async def test_endnow_draws_immediately(cog, channel, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(
+        make_prize(name="PLEX", codes=["A"]), status=STATUS_ACTIVE, message_id=77, ends_at=minutes_ago(-600), entry_mode="button"
+    )
+    await cog.on_button_click(_click(giveaway_id, author_id=10))
+    cog.bot.get_user = lambda user_id: fake_user(user_id)
+
+    inter = fake_interaction()
+    await cog.giveaway_endnow.callback(cog, inter, giveaway=str(giveaway_id))
+
+    assert "ended and its winners were drawn" in _deferred_reply(inter)
+    assert _get(session_factory, giveaway_id).status == STATUS_FINISHED
+    assert [w.discord_id for w in _winners(session_factory, giveaway_id)] == [10]
+
+
+async def test_endnow_refuses_unposted(cog, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(make_prize(codes=["A"]))
+    inter = fake_interaction()
+    await cog.giveaway_endnow.callback(cog, inter, giveaway=str(giveaway_id))
+    assert "hasn't been posted yet" in _deferred_reply(inter)
+    assert _get(session_factory, giveaway_id).status == STATUS_PENDING
+
+
+async def test_autocomplete_open_giveaways(cog, make_prize, make_giveaway):
+    prize_id = make_prize(name="PLEX", codes=["A", "B", "C"])
+    running = make_giveaway(prize_id, status=STATUS_ACTIVE, message_id=1, ends_at=datetime.datetime(2026, 11, 18, 12, 0))
+    scheduled = make_giveaway(prize_id, starts_at=datetime.datetime(2026, 11, 21, 18, 0))
+    make_giveaway(prize_id, status=STATUS_FINISHED)
+
+    choices = await giveaways_module.autocomplete_open_giveaways(SimpleNamespace(bot=cog.bot), "")
+
+    assert [(c.value, c.name) for c in choices] == [
+        (str(scheduled), f"#{scheduled} PLEX (scheduled for 2026-11-21 18:00 UTC)"),
+        (str(running), f"#{running} PLEX (running, ends 2026-11-18 12:00 UTC)"),
+    ]
+
+
+# --- /prize list | import -------------------------------------------------------
+
+
+async def test_prize_list(cog, session_factory, make_prize, make_giveaway):
+    prize_id = make_prize(name="PLEX", codes=["A", "B", "C"])
+    make_giveaway(prize_id, winner_count=2)
+    make_prize(name="Old", codes=["X"], active=False)
+    make_prize(name="Empty", codes=[])
+    used_up = make_prize(name="Used up", codes=["U"])
+    all_reserved = make_prize(name="All reserved", codes=["R"])
+    make_giveaway(all_reserved, winner_count=1)  # 0 available but not empty: stays listed
+    with session_factory.begin() as session:
+        session.scalar(select(GiveawayCode).where(GiveawayCode.prize_id == used_up)).assigned_at = minutes_ago(1)
+
+    inter = fake_interaction()
+    await cog.prize_list.callback(cog, inter, show_empty=False)
+    text = inter.response.send_message.call_args.args[0]
+    assert text.splitlines() == [
+        "**All reserved** — 0 available, 1 reserved by giveaways",
+        "**PLEX** — 1 available, 2 reserved by giveaways",
+        "**Old** *(inactive)* — 1 available",
+        "*2 prize(s) with no codes left hidden; use `show_empty` to see them.*",
+    ]
+    assert inter.response.send_message.call_args.kwargs["ephemeral"] is True
+
+    inter = fake_interaction()
+    await cog.prize_list.callback(cog, inter, show_empty=True)
+    text = inter.response.send_message.call_args.args[0]
+    assert "**Empty** — 0 available" in text and "**Used up** — 0 available" in text and "hidden" not in text
+
+
+async def test_prize_list_all_empty(cog, make_prize):
+    make_prize(name="Empty", codes=[])
+    inter = fake_interaction()
+    await cog.prize_list.callback(cog, inter, show_empty=False)
+    assert inter.response.send_message.call_args.args[0].splitlines() == [
+        "Every prize is out of codes. Add more with `/prize import`.",
+        "*1 prize(s) with no codes left hidden; use `show_empty` to see them.*",
+    ]
+
+
+def _attachment(content: bytes):
+    return SimpleNamespace(size=len(content), read=AsyncMock(return_value=content))
+
+
+async def _import(cog, content, prize=None):
+    inter = fake_interaction()
+    await cog.prize_import.callback(cog, inter, file=_attachment(content), prize=prize)
+    return _deferred_reply(inter)
+
+
+async def test_prize_import_csv_creates_prizes_and_never_echoes_codes(cog, session_factory, make_prize):
+    make_prize(name="PLEX", codes=["SECRET-A"])
+    reply = await _import(cog, "﻿Prize,Code,Given\nPLEX,SECRET-A,\nPLEX,SECRET-B,\nPLEX,SECRET-C,yes\nSkin,SECRET-D,\n".encode())
+
+    assert reply == (
+        "Imported 2 code(s) into 2 prize(s). New prize(s): Skin. Skipped 1 duplicate(s). "
+        "Skipped 1 row(s) marked as already given."
+    )
+    assert "SECRET" not in reply
+    with session_factory() as session:
+        assert sorted(session.scalars(select(GiveawayCode.code))) == ["SECRET-A", "SECRET-B", "SECRET-D"]
+
+
+async def test_prize_import_lines_into_existing_prize(cog, session_factory, make_prize):
+    make_prize(name="PLEX", codes=[])
+    assert await _import(cog, b"A\n\n B \nA\n", prize="PLEX") == "Imported 2 code(s) into 1 prize(s). Skipped 1 duplicate(s)."
+    assert "No prize named 'Nope'" in await _import(cog, b"A\n", prize="Nope")
+    with session_factory() as session:
+        assert session.scalar(select(func.count(Prize.id))) == 1
+
+
+@pytest.mark.parametrize(
+    "content, error",
+    [
+        (b"just,some,columns\n1,2,3\n", "must have 'prize' and 'code' columns"),
+        (b"prize,code\n", "No codes found"),
+        (b"\xff\xfe\x00bad", "isn't UTF-8"),
+    ],
+)
+async def test_prize_import_rejects_bad_files(cog, session_factory, content, error):
+    assert error in await _import(cog, content)
+    with session_factory() as session:
+        assert session.scalar(select(GiveawayCode)) is None
+
+
+async def test_prize_import_rejects_oversized(cog):
+    inter = fake_interaction()
+    big = SimpleNamespace(size=giveaways_module.MAX_IMPORT_BYTES + 1, read=AsyncMock())
+    await cog.prize_import.callback(cog, inter, file=big, prize=None)
+    assert "too big" in _deferred_reply(inter)
+    big.read.assert_not_called()

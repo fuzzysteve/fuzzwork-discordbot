@@ -304,3 +304,37 @@ def test_giveaway_random_rejects_non_positive(run, session_factory, make_prize, 
 @pytest.mark.parametrize("value, ok", [("24", True), (" 3 ", True), ("0", False), ("-1", False), ("abc", False), ("", False)])
 def test_positive_int_validator(value, ok):
     assert (cli._positive_int(value) is True) == ok
+
+
+def test_giveaway_list_shows_scheduled_and_cancelled(run, make_prize, make_giveaway):
+    import datetime
+
+    from fuzzworkbot.db import STATUS_CANCELLED
+
+    prize_id = make_prize(name="PLEX", codes=["A", "B"])
+    make_giveaway(prize_id, starts_at=datetime.datetime(2026, 11, 21, 18, 0))
+    make_giveaway(prize_id, status=STATUS_CANCELLED)
+
+    output = run("giveaway", "list").output
+    assert "scheduled for 2026-11-21 18:00:00 UTC" in output
+    assert "cancelled, no winners drawn" in output
+
+
+@pytest.mark.parametrize("value, ok", [("", True), ("   ", True), ("2099-01-01 00:00", False), ("soon", False)])
+def test_valid_start_time(value, ok):
+    # 2099 is > 90 days ahead, so it's rejected too.
+    assert (cli._valid_start_time(value) is True) == ok
+
+
+def test_prize_list_hides_empty_unless_all(run, session_factory, make_prize, make_giveaway):
+    make_prize(name="PLEX", codes=["A"])
+    make_prize(name="Empty", codes=[])
+    all_reserved = make_prize(name="Reserved", codes=["R"])
+    make_giveaway(all_reserved, winner_count=1)
+
+    output = run("prize", "list").output
+    assert "PLEX" in output and "Reserved" in output and "Empty" not in output
+    assert "(1 prize(s) with no codes left hidden; --all to show them)" in output
+
+    output = run("prize", "list", "--all").output
+    assert "Empty" in output and "hidden" not in output

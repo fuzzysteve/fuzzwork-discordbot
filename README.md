@@ -121,8 +121,17 @@ uv run fuzzworkbot-watchdog --dry-run   # what it would post right now
 ## Discord commands
 
 - `/authme`, `/auththem` — EVE character verification (`/auththem` replies privately).
-- `/creategiveaway` (Manage Server) — queue a one-off giveaway. Members enter with the
-  post's **Enter giveaway** button; the post shows a live countdown and entrant count.
+- `/creategiveaway` (Manage Server) — queue a one-off giveaway, now or at a set
+  `start_at` (EVE time/UTC, `YYYY-MM-DD HH:MM`, up to 90 days ahead; codes are reserved
+  from when you create it). Members enter with the post's **Enter giveaway** button; the
+  post shows a live countdown and entrant count.
+- `/giveaway cancel|endnow` (Manage Server) — cancel a scheduled or running giveaway (no
+  winners, its reserved codes are freed), or end a running one now and draw immediately.
+- `/prize list|import` (Manage Server) — code counts per prize (available / reserved;
+  prizes with no codes left are hidden unless `show_empty`),
+  and importing codes from an attached file: a CSV with `prize`,`code` (and optional
+  `given`) columns like `codes import-csv`, or one code per line plus the `prize` option
+  like `codes load`. Replies are private and never show codes.
 - `/giveawayqueue add|list|remove|clear` (Manage Server) — the timer's prize queue.
 - `/rolemenu create|add|remove|list` (Manage Roles) — reaction role menus. `create`
   posts a menu; `add` takes the menu (pick from the list, or paste any message's link),
@@ -137,7 +146,8 @@ to MySQL directly, it does **not** go through the running bot process):
 
 ```bash
 uv run giveaway-cli prize add                       # interactive: name, description
-uv run giveaway-cli prize list                       # shows unused / available / reserved counts
+uv run giveaway-cli prize list                       # shows unused / available / reserved counts;
+                                                      # prizes with no codes left are hidden, --all shows them
 
 uv run giveaway-cli codes load "PLEX x2"             # paste codes, blank line to finish
 uv run giveaway-cli codes load "PLEX x2" --file codes.txt
@@ -156,7 +166,8 @@ uv run giveaway-cli codes redeem "PLEX x2" --for <discord-id>       # non-intera
                                                       # scripting — skips the menus; exactly one
 uv run giveaway-cli codes redeem "PLEX x2" --note "forum: JohnDoe"  # of --for/--note
 
-uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel
+uv run giveaway-cli giveaway create                  # interactive: pick prize, duration, winners, channel,
+                                                      # optional start time (UTC) to schedule it
 uv run giveaway-cli giveaway random                  # non-interactive: random eligible prize,
                                                       # defaults --duration-hours=48 --winners=1
                                                       # --channel-id=825889984120356894; for cron/timers

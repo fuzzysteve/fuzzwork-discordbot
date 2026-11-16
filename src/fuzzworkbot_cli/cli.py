@@ -1,4 +1,3 @@
-import csv
 import random
 import sys
 
@@ -8,9 +7,12 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from fuzzworkbot.code_import import CodeFileError, import_codes, parse_code_csv
 from fuzzworkbot.config import Config, load_config
 from fuzzworkbot.db import (
+    STATUS_CANCELLED,
     STATUS_FINISHED,
+    STATUS_PENDING,
     Giveaway,
     GiveawayCode,
     GiveawayWinner,
@@ -22,6 +24,7 @@ from fuzzworkbot.db import (
 )
 from fuzzworkbot.giveaway_logic import (
     available_code_count,
+    parse_start_time,
     clear_giveaway_queue,
     describe_queued,
     giveaway_queue,
@@ -103,15 +106,21 @@ def prize_add(name: str, description: str):
 
 
 @prize.command("list")
-def prize_list():
+@click.option("--all", "show_empty", is_flag=True, help="Also list prizes with no unused codes left.")
+def prize_list(show_empty: bool):
+    """List prizes and their code counts. Prizes with no unused codes are hidden unless --all."""
     session_factory, _ = _connect()
     with session_factory() as session:
         prizes = session.scalars(select(Prize).order_by(Prize.name)).all()
         if not prizes:
             click.echo("No prizes yet.")
             return
+        hidden = 0
         for p in prizes:
             unused = unused_code_count(session, p.id)
+            if unused == 0 and not show_empty:
+                hidden += 1
+                continue
             available = available_code_count(session, p.id)
             status = "active" if p.active else "inactive"
             if available == unused:
@@ -122,6 +131,8 @@ def prize_list():
                     f"{p.id:>4}  {p.name:<30} {status:<8} {unused} unused "
                     f"({available} available, {reserved} reserved by running giveaways)"
                 )
+        if hidden:
+            click.echo(f"({hidden} prize(s) with no codes left hidden; --all to show them)")
 
 
 @main.group()
@@ -145,7 +156,6 @@ def codes_load(prize_name: str, file_path: str | None):
         if prize_row is None:
             click.echo(f"No prize named '{prize_name}'. Add it first with 'prize add'.", err=True)
             sys.exit(1)
-        prize_id = prize_row.id
 
     if file_path:
         with open(file_path) as f:
@@ -168,14 +178,7 @@ def codes_load(prize_name: str, file_path: str | None):
         return
 
     with session_factory.begin() as session:
-        existing = set(session.scalars(select(GiveawayCode.code).where(GiveawayCode.prize_id == prize_id)))
-        added = 0
-        for code in codes_to_add:
-            if code in existing:
-                continue
-            session.add(GiveawayCode(prize_id=prize_id, code=code))
-            existing.add(code)
-            added += 1
+        added = import_codes(session, [(prize_name, code) for code in codes_to_add], create_missing_prizes=False).added
 
     skipped = len(codes_to_add) - added
     click.echo(f"Loaded {added} new code(s) for '{prize_name}' ({skipped} duplicate(s) skipped).")
@@ -211,9 +214,6 @@ def codes_list(prize_name: str):
         click.echo(f"{c.code:<30} {status}")
 
 
-GIVEN_TRUTHY = {"yes", "true", "1", "y", "x", "given"}
-
-
 @codes.command(
     "import-csv",
     help="Bulk-import codes for multiple prizes from one CSV. Needs a header row with "
@@ -224,72 +224,27 @@ GIVEN_TRUTHY = {"yes", "true", "1", "y", "x", "given"}
 @click.argument("file_path", type=click.Path(exists=True))
 def codes_import_csv(file_path: str):
     with open(file_path, newline="") as f:
-        reader = csv.DictReader(f)
-        columns = {(name or "").strip().lower(): name for name in (reader.fieldnames or [])}
+        text = f.read()
+    try:
+        parsed = parse_code_csv(text)
+    except CodeFileError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
-        if "prize" not in columns or "code" not in columns:
-            click.echo(
-                "CSV must have 'prize' and 'code' columns in its header row (case-insensitive). "
-                f"Found: {list(reader.fieldnames or [])}",
-                err=True,
-            )
-            sys.exit(1)
-
-        given_column = columns.get("given")
-
-        rows: list[tuple[str, str]] = []
-        skipped_given = 0
-        for csv_row in reader:
-            prize_name = (csv_row.get(columns["prize"]) or "").strip()
-            code = (csv_row.get(columns["code"]) or "").strip()
-            if not prize_name or not code:
-                continue
-            if given_column and (csv_row.get(given_column) or "").strip().lower() in GIVEN_TRUTHY:
-                skipped_given += 1
-                continue
-            rows.append((prize_name, code))
-
-    if not rows:
+    if not parsed.rows:
         click.echo("No importable rows found (after skipping blanks/already-given).")
         return
 
     session_factory, _ = _connect()
-    created_prizes = 0
-    added_codes = 0
-    skipped_dupes = 0
-
     with session_factory.begin() as session:
-        prize_ids: dict[str, int] = {}
-        existing_codes: dict[int, set[str]] = {}
-
-        for prize_name, code in rows:
-            if prize_name not in prize_ids:
-                prize_row = session.scalar(select(Prize).where(Prize.name == prize_name))
-                if prize_row is None:
-                    prize_row = Prize(name=prize_name)
-                    session.add(prize_row)
-                    session.flush()
-                    created_prizes += 1
-                prize_ids[prize_name] = prize_row.id
-                existing_codes[prize_row.id] = set(
-                    session.scalars(select(GiveawayCode.code).where(GiveawayCode.prize_id == prize_row.id))
-                )
-
-            prize_id = prize_ids[prize_name]
-            if code in existing_codes[prize_id]:
-                skipped_dupes += 1
-                continue
-
-            session.add(GiveawayCode(prize_id=prize_id, code=code))
-            existing_codes[prize_id].add(code)
-            added_codes += 1
+        result = import_codes(session, parsed.rows, create_missing_prizes=True)
 
     summary = (
-        f"Imported {added_codes} code(s) across {len(prize_ids)} prize(s) "
-        f"({created_prizes} new prize(s) created, {skipped_dupes} duplicate code(s) skipped"
+        f"Imported {result.added} code(s) across {len(result.prize_names)} prize(s) "
+        f"({len(result.created_prizes)} new prize(s) created, {result.skipped_duplicates} duplicate code(s) skipped"
     )
-    if given_column:
-        summary += f", {skipped_given} already-given row(s) skipped"
+    if parsed.has_given_column:
+        summary += f", {parsed.skipped_given} already-given row(s) skipped"
     click.echo(summary + ").")
 
 
@@ -478,6 +433,14 @@ def _positive_int(value: str) -> bool | str:
     return (value.strip().isdigit() and int(value) > 0) or "Enter a whole number greater than 0."
 
 
+def _valid_start_time(value: str) -> bool | str:
+    """questionary validator: blank (start now) or a valid future start time."""
+    if not value.strip():
+        return True
+    result = parse_start_time(value, now_utc())
+    return result if isinstance(result, str) else True
+
+
 @giveaway.command("create")
 def giveaway_create():
     session_factory, config = _connect()
@@ -502,9 +465,14 @@ def giveaway_create():
     winners = questionary.text("Number of winners:", default="1", validate=_positive_int).ask()
     channel_id = questionary.text("Channel ID:", validate=_positive_int).ask()
     guild_id = questionary.text("Guild ID:", default=str(config.guild_id), validate=_positive_int).ask()
-    if not duration_hours or not winners or not channel_id or not guild_id:
+    start_text = questionary.text(
+        "Start at, EVE time/UTC (YYYY-MM-DD HH:MM; leave blank to start now):",
+        validate=_valid_start_time,
+    ).ask()
+    if not duration_hours or not winners or not channel_id or not guild_id or start_text is None:
         click.echo("Cancelled.")
         return
+    starts_at = parse_start_time(start_text, now_utc()) if start_text.strip() else None
 
     with session_factory.begin() as session:
         # Lock the prize row so this can't race a concurrent /creategiveaway or
@@ -526,10 +494,14 @@ def giveaway_create():
                 channel_id=int(channel_id),
                 duration_hours=int(duration_hours),
                 winner_count=int(winners),
+                starts_at=starts_at,
             )
         )
 
-    click.echo("Giveaway queued. The bot will post it within about a minute.")
+    if starts_at:
+        click.echo(f"Giveaway scheduled for {starts_at:%Y-%m-%d %H:%M} UTC. Its codes are reserved from now.")
+    else:
+        click.echo("Giveaway queued. The bot will post it within about a minute.")
 
 
 DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
@@ -726,6 +698,10 @@ def giveaway_list():
                     detail = f"winners=[{', '.join(names)}]"
                 else:
                     detail = "winners=none (no entrants)"
+            elif g.status == STATUS_CANCELLED:
+                detail = "cancelled, no winners drawn"
+            elif g.status == STATUS_PENDING and g.starts_at is not None:
+                detail = f"channel={g.channel_id} scheduled for {g.starts_at} UTC winners_wanted={g.winner_count}"
             else:
                 detail = f"channel={g.channel_id} ends_at={g.ends_at} UTC winners_wanted={g.winner_count}"
             click.echo(f"{g.id:>4}  {g.status:<9} prize={prize_name:<25} {detail}")
