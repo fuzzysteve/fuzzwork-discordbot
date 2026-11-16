@@ -14,7 +14,7 @@ from fuzzworkbot.db import (
     Giveaway,
     GiveawayCode,
     GiveawayWinner,
-    NextGiveaway,
+    QueuedGiveaway,
     Prize,
     RoleReaction,
     make_session_factory,
@@ -22,9 +22,11 @@ from fuzzworkbot.db import (
 )
 from fuzzworkbot.giveaway_logic import (
     available_code_count,
-    clear_next_giveaway,
-    get_next_giveaway,
-    set_next_giveaway,
+    clear_giveaway_queue,
+    describe_queued,
+    giveaway_queue,
+    queue_giveaway,
+    remove_queued_giveaway,
     unused_code_count,
 )
 
@@ -535,11 +537,11 @@ DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
 
 @giveaway.command(
     "random",
-    help="Create a giveaway for a randomly chosen active prize (only prizes with "
-    "enough available codes for the requested winner count are eligible). If a prize "
-    "has been chosen with 'giveaway next set', that's used instead (once) — falling "
-    "back to a random pick, and keeping the choice for the next run, if it can't be "
-    "covered right now. Fully non-interactive — no prompts — for cron/systemd timer use.",
+    help="Create a giveaway for the first prize in the queue ('giveaway queue') that "
+    "can run right now, removing it from the queue. Queued prizes that can't run yet "
+    "are skipped and kept. With nothing runnable queued, picks a random active prize "
+    "with enough available codes for the requested winner count. Fully "
+    "non-interactive — no prompts — for cron/systemd timer use.",
 )
 @click.option("--duration-hours", type=click.IntRange(min=1), default=48, show_default=True)
 @click.option("--winners", type=click.IntRange(min=1), default=1, show_default=True)
@@ -550,11 +552,10 @@ def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id
     guild_id = guild_id or config.guild_id
 
     with session_factory.begin() as session:
-        next_row = session.scalar(select(NextGiveaway).with_for_update())
-        if next_row is not None:
+        for queued in session.scalars(select(QueuedGiveaway).order_by(QueuedGiveaway.id).with_for_update()).all():
             # Same lock-and-check as every other creation path (see CLAUDE.md).
-            prize_row = session.scalar(select(Prize).where(Prize.id == next_row.prize_id).with_for_update())
-            wanted = next_row.winner_count or winners
+            prize_row = session.scalar(select(Prize).where(Prize.id == queued.prize_id).with_for_update())
+            wanted = queued.winner_count or winners
             available = available_code_count(session, prize_row.id)
             if prize_row.active and wanted <= available:
                 session.add(
@@ -566,17 +567,16 @@ def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id
                         winner_count=wanted,
                     )
                 )
-                session.delete(next_row)
+                session.delete(queued)
                 click.echo(
-                    f"Chosen next giveaway queued for '{prize_row.name}' ({wanted} winner(s), "
+                    f"Queued giveaway #{queued.id} created for '{prize_row.name}' ({wanted} winner(s), "
                     f"{duration_hours}h) in channel {channel_id}. The bot will post it within about a minute."
                 )
                 return
             reason = "it's inactive" if not prize_row.active else f"it only has {available} available code(s)"
             click.echo(
-                f"Chosen next giveaway '{prize_row.name}' ({wanted} winner(s)) can't run — {reason}. "
-                "Keeping it for the next run and picking a random prize this time "
-                "(change it with 'giveaway next set' or 'giveaway next clear').",
+                f"Skipping queued #{queued.id} '{prize_row.name}' ({wanted} winner(s)) — {reason}. "
+                "Keeping it in the queue ('giveaway queue remove' to drop it).",
                 err=True,
             )
 
@@ -621,23 +621,15 @@ def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id
 
 
 @giveaway.group(
-    "next",
-    help="Choose the prize the next 'giveaway random' run (the systemd timer) will use, "
-    "instead of a random one.",
+    "queue",
+    help="Line up prizes for 'giveaway random' (the systemd timer) to use, in order, "
+    "instead of random picks. Same queue as /giveawayqueue in Discord.",
 )
-def giveaway_next():
+def giveaway_queue_group():
     pass
 
 
-def _describe_next(session) -> str:
-    row = get_next_giveaway(session)
-    if row is None:
-        return "No next giveaway chosen — the next random run will pick a prize at random."
-    winners = f"{row.winner_count} winner(s)" if row.winner_count else "the run's --winners (default 1)"
-    return f"Next giveaway: '{row.prize.name}', {winners} (set {row.set_at} UTC)."
-
-
-@giveaway_next.command("set")
+@giveaway_queue_group.command("add")
 @click.argument("prize_name", required=False, default=None)
 @click.option(
     "--winners",
@@ -645,8 +637,8 @@ def _describe_next(session) -> str:
     default=None,
     help="Winner count for that giveaway; omit to use the random run's own --winners.",
 )
-def giveaway_next_set(prize_name: str | None, winners: int | None):
-    """Set the next giveaway's prize. Menu-driven when PRIZE_NAME is omitted."""
+def giveaway_queue_add(prize_name: str | None, winners: int | None):
+    """Add a prize to the end of the queue. Menu-driven when PRIZE_NAME is omitted."""
     session_factory, _ = _connect()
 
     if prize_name is None:
@@ -662,30 +654,51 @@ def giveaway_next_set(prize_name: str | None, winners: int | None):
 
     with session_factory.begin() as session:
         prize_row = session.scalar(select(Prize).where(Prize.id == prize_id).with_for_update())
-        error = set_next_giveaway(session, prize_row, winners)
+        error = queue_giveaway(session, prize_row, winners)
         if error:
-            click.echo(f"Not set: {error}", err=True)
+            click.echo(f"Not queued: {error}", err=True)
             sys.exit(1)
 
+    _print_queue(session_factory)
+
+
+def _print_queue(session_factory) -> None:
     with session_factory() as session:
-        click.echo(_describe_next(session))
+        rows = giveaway_queue(session)
+        if not rows:
+            click.echo("Queue is empty — the next random run will pick a prize at random.")
+            return
+        for n, row in enumerate(rows, start=1):
+            click.echo(f"{n:>3}. {describe_queued(row)}  (added {row.added_at:%Y-%m-%d %H:%M} UTC)")
 
 
-@giveaway_next.command("show")
-def giveaway_next_show():
-    """Show the chosen next giveaway, if any."""
+@giveaway_queue_group.command("list")
+def giveaway_queue_list():
+    """Show the queue, next-up first."""
     session_factory, _ = _connect()
-    with session_factory() as session:
-        click.echo(_describe_next(session))
+    _print_queue(session_factory)
 
 
-@giveaway_next.command("clear")
-def giveaway_next_clear():
-    """Forget the chosen next giveaway; the next random run picks at random again."""
+@giveaway_queue_group.command("remove")
+@click.argument("queue_id", type=int)
+def giveaway_queue_remove(queue_id: int):
+    """Remove one entry, by the #id shown in 'giveaway queue list'."""
     session_factory, _ = _connect()
     with session_factory.begin() as session:
-        had_one = clear_next_giveaway(session)
-    click.echo("Cleared." if had_one else "No next giveaway was set.")
+        removed = remove_queued_giveaway(session, queue_id)
+    if not removed:
+        click.echo(f"No queue entry #{queue_id}.", err=True)
+        sys.exit(1)
+    click.echo(f"Removed #{queue_id}.")
+
+
+@giveaway_queue_group.command("clear")
+def giveaway_queue_clear():
+    """Empty the queue; random runs pick at random again."""
+    session_factory, _ = _connect()
+    with session_factory.begin() as session:
+        count = clear_giveaway_queue(session)
+    click.echo(f"Cleared {count} queued giveaway(s)." if count else "Queue was already empty.")
 
 
 @giveaway.command("list")

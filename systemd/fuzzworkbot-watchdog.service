@@ -1,0 +1,11 @@
+[Unit]
+Description=Fuzzwork Discord bot - alert if the giveaway poller has stopped
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/discordbot
+EnvironmentFile=/home/discordbot/.env
+ExecStart=/root/.local/bin/uv run fuzzworkbot-watchdog
+User=root

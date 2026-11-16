@@ -98,11 +98,37 @@ created two unplanned real giveaways the first time this was set up. Don't add
 `OnBootSec=` back without a large value; `OnUnitActiveSec` alone correctly waits the
 full interval before its first run.
 
-To pick what the next timer run creates instead of leaving it random, use
-`/nextgiveaway set` in Discord (Manage Server permission) or `giveaway-cli giveaway next
-set`. The choice is used once and then cleared. If, when the timer fires, that prize is
-inactive or can't cover the winner count any more, the run falls back to a random prize
-and keeps the choice for the following run (the warning shows in the journal).
+To choose what the timer runs create instead of leaving them random, queue prizes with
+`/giveawayqueue add` in Discord (Manage Server permission) or `giveaway-cli giveaway
+queue add`. Each run uses the first queued prize that can run and removes it from the
+queue. A queued prize that's inactive or short of codes when the timer fires is skipped
+and stays queued (the warning shows in the journal). With nothing runnable queued, the
+run picks a random prize.
+
+### Poller watchdog (optional)
+
+Alerts in the admin channel (972857594257498153) if the bot's giveaway poller hasn't
+completed a run in 10 minutes, and again once it recovers:
+
+```bash
+sudo cp systemd/fuzzworkbot-watchdog.service /etc/systemd/system/
+sudo cp systemd/fuzzworkbot-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fuzzworkbot-watchdog.timer
+uv run fuzzworkbot-watchdog --dry-run   # what it would post right now
+```
+
+## Discord commands
+
+- `/authme`, `/auththem` — EVE character verification (`/auththem` replies privately).
+- `/creategiveaway` (Manage Server) — queue a one-off giveaway. Members enter with the
+  post's **Enter giveaway** button; the post shows a live countdown and entrant count.
+- `/giveawayqueue add|list|remove|clear` (Manage Server) — the timer's prize queue.
+- `/rolemenu create|add|remove|list` (Manage Roles) — reaction role menus. `create`
+  posts a menu; `add` takes the menu (pick from the list, or paste any message's link),
+  an emoji and a role. You can only add roles below your own highest role, and below
+  the bot's.
+- `/type`, `/system` — EVE item and solar system lookups.
 
 ## Admin CLI (`giveaway-cli`)
 
@@ -134,12 +160,12 @@ uv run giveaway-cli giveaway create                  # interactive: pick prize, 
 uv run giveaway-cli giveaway random                  # non-interactive: random eligible prize,
                                                       # defaults --duration-hours=48 --winners=1
                                                       # --channel-id=825889984120356894; for cron/timers
-uv run giveaway-cli giveaway next set "PLEX x2"      # make the next `giveaway random` run (the timer)
-                                                      # use this prize instead of a random one; used
-                                                      # once, then cleared. Optional --winners N; omit
-                                                      # PRIZE for a menu. Same as /nextgiveaway set
-uv run giveaway-cli giveaway next show                # what the next timer run will use, if chosen
-uv run giveaway-cli giveaway next clear               # back to a random pick
+uv run giveaway-cli giveaway queue add "PLEX x2"     # queue a prize for the timer's `giveaway random`
+                                                      # runs, in order; optional --winners N; omit
+                                                      # PRIZE for a menu. Same as /giveawayqueue add
+uv run giveaway-cli giveaway queue list               # next-up first, with #ids
+uv run giveaway-cli giveaway queue remove <id>        # drop one entry
+uv run giveaway-cli giveaway queue clear              # back to random picks
 uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
 uv run giveaway-cli giveaway winners <id>             # winners + their actual codes for one giveaway, CLI-only
 
@@ -177,13 +203,17 @@ and `giveaway-cli giveaway create` just insert a `pending` row — a background 
 the bot (`cogs/giveaways.py`, runs every minute) is what actually posts the message and
 later closes it out:
 
-1. **Pending → active**: posts the giveaway embed to the channel — prize, winner count,
-   and the end time spelled out in UTC — records the message ID, sets `starts_at`/`ends_at`.
-2. **Active, past `ends_at`**: collects everyone who reacted, randomly draws up to
-   `winner_count` distinct reactors (fewer if there weren't enough entrants), and for
+1. **Pending → active**: posts the giveaway embed to the channel (prize, winner count,
+   entrant count, and a countdown that Discord shows in each reader's own timezone) with
+   an **Enter giveaway** button, records the message ID, sets `starts_at`/`ends_at`.
+   Pressing the button records a `giveaway_entries` row and confirms privately; the
+   poller refreshes the entrant count on the post each minute when it's changed.
+2. **Active, past `ends_at`**: draws up to `winner_count` distinct entrants (fewer if
+   there weren't enough), disables the button, and for
    each winner claims one unused code from that prize's pool, DMs them their own code,
    and records the win in `giveaway_winners`. Posts one public announcement listing all
-   winners (without codes). If a DM fails (winner has DMs closed) or the prize
+   winners (without codes). Giveaways posted before the button existed are still entered
+   and drawn by reactions. If a DM fails (winner has DMs closed) or the prize
    unexpectedly runs out of codes, that winner's line says so and an admin needs to
    deliver the code by hand — this shouldn't normally happen, since both `/creategiveaway`
    and `giveaway-cli giveaway create` check capacity before ever creating the giveaway.
@@ -194,7 +224,7 @@ runs on is not UTC (`Europe/Berlin`).
 
 ### Giveaway capacity checks
 
-Every `GiveawayCode` row for a prize is "unused" (`assigned_to_discord_id IS NULL`)
+Every `GiveawayCode` row for a prize is "unused" (`assigned_at IS NULL`)
 until a giveaway finish claims it — but a `pending`/`active` giveaway has already
 *promised* `winner_count` of them before it finishes. `fuzzworkbot.giveaway_logic`
 tracks this:
@@ -260,7 +290,9 @@ Both commands are rate-limited to once per 30 seconds per user
 
 ## Role reactions
 
-`role_reactions` rows map `(message_id, emoji) → role_id`. The bot listens for raw
+`role_reactions` rows map `(message_id, emoji) → role_id`. Set them up with `/rolemenu`
+in Discord or `giveaway-cli role-menu`. Menus posted by `/rolemenu create` also get a
+`role_menus` row, so the bot keeps the menu's role list up to date. The bot listens for raw
 reaction add/remove events (works even if the message isn't in its cache) and toggles
 the role live. On startup it also reconciles: for every tracked message, it grants the
 mapped role to anyone currently reacted who's missing it — this self-heals for
@@ -273,14 +305,20 @@ member/reaction diff and hasn't been needed so far.
 - `userlookup(id, discordid, eveid)` — written by the PHP auth app, read by `/authme`.
 - `prizes(id, name, description, active, created_at)`
 - `giveaway_codes(id, prize_id, code, assigned_to_discord_id, assigned_at, created_at)`
-- `giveaways(id, prize_id, guild_id, channel_id, message_id, created_by_discord_id, duration_hours, status, created_at, starts_at, ends_at, winner_count)` —
+- `giveaways(id, prize_id, guild_id, channel_id, message_id, created_by_discord_id, duration_hours, status, created_at, starts_at, ends_at, winner_count, entry_mode)` —
   also still has unused `winner_discord_id`/`code_id` columns left over from the
   single-winner design (see `db.py`'s comment; dropping them live was judged too risky
   to force through, they're just dead columns now, don't resurrect them)
 - `giveaway_winners(id, giveaway_id, discord_id, code_id, drawn_at)` — one row per
   winner per giveaway; `code_id` is null only in the (shouldn't-happen) case where the
   prize ran out of codes at draw time
+- `giveaway_entries(id, giveaway_id, discord_id, entered_at)` — button entries, unique
+  per giveaway and user
+- `giveaway_queue(id, prize_id, winner_count, added_by_discord_id, added_at)` — prizes
+  queued for the timer, used in id order
 - `role_reactions(id, guild_id, channel_id, message_id, emoji, role_id, created_at)`
+- `role_menus(message_id, guild_id, channel_id, title, description, created_by_discord_id, created_at)`
+  — menus the bot posted via `/rolemenu create`
 
 ## Security
 

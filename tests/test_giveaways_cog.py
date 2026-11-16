@@ -16,6 +16,7 @@ def _channel(message=None):
     channel = MagicMock()
     channel.send = AsyncMock(return_value=SimpleNamespace(id=5555))
     channel.fetch_message = AsyncMock(return_value=message)
+    channel.get_partial_message.return_value.edit = AsyncMock()
     return channel
 
 
@@ -255,41 +256,53 @@ def test_module_config_uses_test_guild():
     assert giveaways_module._config.guild_id == 1000
 
 
-# --- /nextgiveaway ---------------------------------------------------------------
+# --- /giveawayqueue --------------------------------------------------------------
 
 
-async def test_nextgiveaway_set_show_clear(cog, session_factory, make_prize):
-    from fuzzworkbot.db import NextGiveaway
+async def test_giveawayqueue_add_list_remove_clear(cog, session_factory, make_prize):
+    from fuzzworkbot.db import QueuedGiveaway
 
-    prize_id = make_prize(name="PLEX", codes=["A", "B"])
+    prize_id = make_prize(name="PLEX", codes=["A", "B", "C"])
     inter = fake_interaction(author_id=42)
-
-    await cog.nextgiveaway_set.callback(cog, inter, prize="PLEX", winners=2)
-    assert "**PLEX** (2 winner(s))" in inter.response.send_message.call_args.args[0]
+    await cog.giveawayqueue_add.callback(cog, inter, prize="PLEX", winners=2)
+    assert "position 1" in inter.response.send_message.call_args.args[0]
+    inter = fake_interaction()
+    await cog.giveawayqueue_add.callback(cog, inter, prize="PLEX", winners=None)
+    assert "position 2" in inter.response.send_message.call_args.args[0]
     with session_factory() as session:
-        row = session.scalar(select(NextGiveaway))
-    assert (row.prize_id, row.winner_count, row.set_by_discord_id) == (prize_id, 2, 42)
+        rows = session.scalars(select(QueuedGiveaway).order_by(QueuedGiveaway.id)).all()
+    assert [(r.prize_id, r.winner_count, r.added_by_discord_id) for r in rows] == [(prize_id, 2, 42), (prize_id, None, 42)]
 
     inter = fake_interaction()
-    await cog.nextgiveaway_show.callback(cog, inter)
-    assert "**PLEX**" in inter.response.send_message.call_args.args[0]
+    await cog.giveawayqueue_list.callback(cog, inter)
+    listing = inter.response.send_message.call_args.args[0]
+    assert listing.startswith("1. #") and "PLEX (2 winner(s))" in listing and "2. #" in listing
+
+    inter = SimpleNamespace(bot=cog.bot)
+    choices = await giveaways_module.autocomplete_queue(inter, "")
+    assert [c.value for c in choices] == [str(rows[0].id), str(rows[1].id)]
 
     inter = fake_interaction()
-    await cog.nextgiveaway_clear.callback(cog, inter)
-    assert "Cleared" in inter.response.send_message.call_args.args[0]
-    with session_factory() as session:
-        assert session.scalar(select(NextGiveaway)) is None
+    await cog.giveawayqueue_remove.callback(cog, inter, entry=str(rows[0].id))
+    assert inter.response.send_message.call_args.args[0] == "Removed."
+    inter = fake_interaction()
+    await cog.giveawayqueue_remove.callback(cog, inter, entry="nonsense")
+    assert inter.response.send_message.call_args.args[0] == "No such queue entry."
+
+    inter = fake_interaction()
+    await cog.giveawayqueue_clear.callback(cog, inter)
+    assert "Cleared 1" in inter.response.send_message.call_args.args[0]
 
 
-async def test_nextgiveaway_set_rejects_over_capacity(cog, session_factory, make_prize):
-    from fuzzworkbot.db import NextGiveaway
+async def test_giveawayqueue_add_rejects_over_capacity(cog, session_factory, make_prize):
+    from fuzzworkbot.db import QueuedGiveaway
 
     make_prize(name="PLEX", codes=["A"])
     inter = fake_interaction()
-    await cog.nextgiveaway_set.callback(cog, inter, prize="PLEX", winners=3)
-    assert "Not set" in inter.response.send_message.call_args.args[0]
+    await cog.giveawayqueue_add.callback(cog, inter, prize="PLEX", winners=3)
+    assert "Not queued" in inter.response.send_message.call_args.args[0]
     with session_factory() as session:
-        assert session.scalar(select(NextGiveaway)) is None
+        assert session.scalar(select(QueuedGiveaway)) is None
 
 
 # --- poller resilience -----------------------------------------------------------
@@ -351,3 +364,131 @@ async def test_finish_dm_server_error_still_finishes(cog, channel, session_facto
     assert len(_winners(session_factory, giveaway_id)) == 2
     second.send.assert_awaited_once()
     assert "couldn't DM you" in channel.send.call_args.kwargs["embed"].description
+
+
+
+# --- button entry, countdown, entrant counts, heartbeat ---------------------------
+
+
+def test_giveaway_embed_has_discord_countdown():
+    ends_at = datetime.datetime(2026, 11, 18, 12, 0, 0)  # naive UTC
+    embed = giveaways_module.giveaway_embed("PLEX", 1, ends_at, entrants=3)
+    ends = embed.fields[-1]
+    assert ends.name == "Ends"
+    assert ends.value == "<t:1795003200:R> (<t:1795003200:f>)"
+    assert {f.name: f.value for f in embed.fields}["Entrants"] == "3"
+    assert embed.fields[-1].name == "Ends"
+    assert giveaways_module.giveaway_embed("PLEX", 1, ends_at, None, ended=True).fields[-1].name == "Ended"
+
+
+async def test_post_uses_enter_button(cog, channel, session_factory, make_prize, make_giveaway):
+    from fuzzworkbot.db import ENTRY_BUTTON
+
+    giveaway_id = make_giveaway(make_prize(name="PLEX", codes=["A"]))
+    await cog._post_pending()
+
+    [button] = channel.send.call_args.kwargs["components"]
+    assert button.custom_id == f"giveaway:enter:{giveaway_id}" and not button.disabled
+    assert _get(session_factory, giveaway_id).entry_mode == ENTRY_BUTTON
+    assert {f.name: f.value for f in channel.send.call_args.kwargs["embed"].fields}["Entrants"] == "0"
+
+
+def _click(giveaway_id, author_id=10, custom_id=None):
+    inter = MagicMock()
+    inter.component.custom_id = custom_id or f"giveaway:enter:{giveaway_id}"
+    inter.author.id = author_id
+    inter.response.send_message = AsyncMock()
+    return inter
+
+
+def _entries(session_factory, giveaway_id):
+    from fuzzworkbot.db import GiveawayEntry
+
+    with session_factory() as session:
+        return sorted(session.scalars(select(GiveawayEntry.discord_id).where(GiveawayEntry.giveaway_id == giveaway_id)))
+
+
+async def test_enter_button_records_entry_once(cog, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(make_prize(codes=["A"]), status=STATUS_ACTIVE, message_id=1, ends_at=minutes_ago(-60))
+
+    first = _click(giveaway_id)
+    await cog.on_button_click(first)
+    again = _click(giveaway_id)
+    await cog.on_button_click(again)
+
+    assert "You're entered" in first.response.send_message.call_args.args[0]
+    assert "already entered" in again.response.send_message.call_args.args[0]
+    assert first.response.send_message.call_args.kwargs["ephemeral"] is True
+    assert _entries(session_factory, giveaway_id) == [10]
+
+
+async def test_enter_button_refuses_ended_giveaways(cog, session_factory, make_prize, make_giveaway):
+    prize_id = make_prize(codes=["A"])
+    past_end = make_giveaway(prize_id, status=STATUS_ACTIVE, message_id=1, ends_at=minutes_ago(1))
+    finished = make_giveaway(prize_id, status=STATUS_FINISHED, message_id=2, ends_at=minutes_ago(-60))
+    for giveaway_id in (past_end, finished, 999):
+        inter = _click(giveaway_id)
+        await cog.on_button_click(inter)
+        assert "has ended" in inter.response.send_message.call_args.args[0]
+        assert _entries(session_factory, giveaway_id) == []
+
+
+async def test_other_buttons_are_ignored(cog):
+    inter = _click(0, custom_id="something:else")
+    await cog.on_button_click(inter)
+    inter.response.send_message.assert_not_called()
+
+
+async def test_refresh_entrant_counts_edits_only_changed_posts(cog, channel, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(
+        make_prize(name="PLEX", codes=["A"]), status=STATUS_ACTIVE, message_id=77, ends_at=minutes_ago(-60), entry_mode="button"
+    )
+    edit = channel.get_partial_message.return_value.edit
+
+    await cog._refresh_entrant_counts()  # first look after a restart: always refreshed
+    assert edit.await_count == 1
+    await cog._refresh_entrant_counts()  # unchanged: no edit
+    assert edit.await_count == 1
+
+    await cog.on_button_click(_click(giveaway_id))
+    await cog._refresh_entrant_counts()
+    assert edit.await_count == 2
+    channel.get_partial_message.assert_called_with(77)
+    assert {f.name: f.value for f in edit.call_args.kwargs["embed"].fields}["Entrants"] == "1"
+
+
+async def test_finish_button_giveaway_draws_from_entries(cog, channel, session_factory, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(
+        make_prize(name="PLEX", codes=["A"]), status=STATUS_ACTIVE, message_id=77, ends_at=minutes_ago(-60), entry_mode="button"
+    )
+    await cog.on_button_click(_click(giveaway_id, author_id=10))
+    with session_factory.begin() as session:
+        session.get(Giveaway, giveaway_id).ends_at = minutes_ago(1)
+    winner = fake_user(10)
+    cog.bot.get_user = lambda user_id: None
+    cog.bot.fetch_user = AsyncMock(return_value=winner)
+
+    await cog._finish_one(giveaway_id)
+
+    channel.fetch_message.assert_not_called()  # entries come from the DB, not reactions
+    [row] = _winners(session_factory, giveaway_id)
+    assert row.discord_id == 10
+    assert "Your code: `A`" in winner.send.call_args.args[0]
+    assert channel.send.call_args.kwargs["embed"].description == "<@10>"
+    edit = channel.get_partial_message.return_value.edit.call_args.kwargs
+    assert edit["components"][0].disabled is True
+    assert edit["embed"].fields[-1].name == "Ended"
+
+
+async def test_poll_writes_heartbeat_only_when_healthy(cog, monkeypatch):
+    from fuzzworkbot import watchdog
+
+    for step in ("_post_pending", "_refresh_entrant_counts", "_finish_active"):
+        monkeypatch.setattr(cog, step, AsyncMock())
+    await cog.poll.coro(cog)
+    assert watchdog.read_heartbeat() is not None
+
+    watchdog.HEARTBEAT_FILE.unlink()
+    monkeypatch.setattr(cog, "_finish_active", AsyncMock(side_effect=RuntimeError("DB down")))
+    await cog.poll.coro(cog)
+    assert watchdog.read_heartbeat() is None

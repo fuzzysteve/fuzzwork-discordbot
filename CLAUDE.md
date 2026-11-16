@@ -43,6 +43,8 @@ whoever (human or Claude) touches it next.
 - `systemd/fuzzworkbot-random-giveaway.{service,timer}` — installed the same way, drives
   `giveaway-cli giveaway random` on a schedule. See the "systemd timer" note under
   Conventions before touching `OnBootSec=`/`OnUnitActiveSec=` in the `.timer`.
+- `systemd/fuzzworkbot-watchdog.{service,timer}` — every 5 min, alerts if the giveaway
+  poller's heartbeat goes stale; see Conventions.
 - `systemd/fuzzworkbot-update-check.{service,timer}` — daily (09:00 Berlin) run of
   `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
   a newer uv release (`uv self update --dry-run`; uv is a standalone install at
@@ -139,13 +141,35 @@ whoever (human or Claude) touches it next.
   DM or announcement is sent. Never move a Discord send back inside that transaction: a
   later failure would roll back code claims for DMs that already went out, and the
   retry would hand the same code to someone else.
-- `NextGiveaway` (`next_giveaway` table) is a single-row override (id is always
-  `NEXT_GIVEAWAY_ID`) for which prize the next `giveaway random` run uses. It's set via
-  `/nextgiveaway` or `giveaway-cli giveaway next`, both of which go through
-  `giveaway_logic.set_next_giveaway()`. Setting it reserves no codes. `giveaway random`
-  re-runs the usual lock-and-capacity check and deletes the row in the same transaction
-  that inserts the Giveaway. If the chosen prize can't run, it falls back to a random
-  pick and leaves the row in place for the next run.
+- `QueuedGiveaway` (`giveaway_queue` table) is an ordered list (by id) of prizes for
+  `giveaway random` to use instead of random picks. It's edited via `/giveawayqueue` or
+  `giveaway-cli giveaway queue`, both going through `giveaway_logic.queue_giveaway()`,
+  which refuses an entry the prize can't cover *together with* what's already queued for
+  it. Queuing reserves no codes. `giveaway random` walks the queue in order, re-runs the
+  usual lock-and-capacity check per entry, and uses (and deletes, in the same
+  transaction as the Giveaway insert) the first one that can run. Entries that can't run
+  stay queued; with nothing runnable it falls back to a random prize. This replaced a
+  single-row `next_giveaway` table, which was dropped by hand.
+- Giveaway entry is a button, not reactions. `Giveaway.entry_mode` is `"reaction"` by
+  default (and was for every giveaway posted before the button existed); `_post_one`
+  sets `"button"` when it posts. Button giveaways' entrants are `GiveawayEntry` rows
+  (unique per giveaway+user), written by the `on_button_click` listener, which matches
+  the `giveaway:enter:<id>` custom_id prefix instead of using a registered View, so
+  buttons survive restarts with no setup. `_finish_one` still reads reactions for
+  `"reaction"` giveaways. Entrant counts on posts are refreshed by the poller (only when
+  changed), not per click, to stay clear of Discord's message-edit rate limit.
+- The poller writes `/var/lib/fuzzworkbot/poller-heartbeat` after every fully successful
+  run. `fuzzworkbot-watchdog` (`src/fuzzworkbot/watchdog.py`, every 5 min via
+  `systemd/fuzzworkbot-watchdog.{service,timer}`) posts to channel 972857594257498153
+  when it's over 10 minutes old, and again when it recovers (state in
+  `/var/lib/fuzzworkbot/watchdog.json`). Tests redirect both files to tmp (conftest).
+- `/rolemenu` (in `cogs/role_reactions.py`) writes the same `role_reactions` rows as
+  `giveaway-cli role-menu`. Menus it posts itself also get a `RoleMenu` row so it can
+  re-render their role list; menus on other messages work without one. `_role_problem`
+  refuses @everyone, integration-managed roles, roles at or above the bot's top role,
+  and (unless the user is the guild owner) roles at or above the user's own top role.
+  Without that last check, anyone with Manage Roles could map a role above their own and
+  react to give it to themselves. Keep it.
 
 ## Secrets
 

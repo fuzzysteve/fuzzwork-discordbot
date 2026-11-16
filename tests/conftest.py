@@ -27,6 +27,15 @@ import pytest  # noqa: E402
 from fuzzworkbot.db import STATUS_PENDING, Giveaway, GiveawayCode, Prize, make_session_factory, now_utc  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolated_watchdog_files(tmp_path, monkeypatch):
+    """Never touch the real /var/lib/fuzzworkbot from tests."""
+    from fuzzworkbot import watchdog
+
+    monkeypatch.setattr(watchdog, "HEARTBEAT_FILE", tmp_path / "poller-heartbeat")
+    monkeypatch.setattr(watchdog, "STATE_FILE", tmp_path / "watchdog.json")
+
+
 @pytest.fixture
 def db_url(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'test.db'}"

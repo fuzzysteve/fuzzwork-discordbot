@@ -79,6 +79,11 @@ STATUS_PENDING = "pending"
 STATUS_ACTIVE = "active"
 STATUS_FINISHED = "finished"
 
+# Giveaway.entry_mode values. Giveaways posted before the Enter button existed were
+# entered by reacting; the live column's server default keeps those rows "reaction".
+ENTRY_REACTION = "reaction"
+ENTRY_BUTTON = "button"
+
 
 class Giveaway(Base):
     __tablename__ = "giveaways"
@@ -96,6 +101,10 @@ class Giveaway(Base):
     starts_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     ends_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     winner_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Set to ENTRY_BUTTON when the bot posts the giveaway (cogs/giveaways.py _post_one).
+    entry_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=ENTRY_REACTION, server_default=ENTRY_REACTION
+    )
     # `winner_discord_id` and `code_id` columns still exist in MySQL (dropping them
     # live was judged too risky to force through) but are unused now that a giveaway
     # can have multiple winners — see GiveawayWinner instead. Do not resurrect them.
@@ -119,28 +128,57 @@ class GiveawayWinner(Base):
     giveaway: Mapped["Giveaway"] = relationship()
 
 
-# NextGiveaway.id is always this — the table holds at most one row.
-NEXT_GIVEAWAY_ID = 1
+class QueuedGiveaway(Base):
+    """Upcoming prizes for `giveaway-cli giveaway random` (the systemd timer), used in
+    id order instead of a random pick. Each run takes the first entry that can run right
+    now and deletes it in the same transaction that inserts the Giveaway, so each entry is
+    used exactly once. Entries that can't run yet stay queued. Queuing reserves no codes;
+    capacity is re-checked when the run actually uses an entry. Replaces the single-row
+    `next_giveaway` table."""
 
-
-class NextGiveaway(Base):
-    """Admin override for what the next `giveaway-cli giveaway random` run (the systemd
-    timer) creates, instead of picking a prize at random. Single-row table (id is always
-    NEXT_GIVEAWAY_ID); the random run deletes the row in the same transaction that
-    inserts the Giveaway it produced, so it's used exactly once. Setting it does not
-    reserve any codes — capacity is re-checked when the run actually uses it."""
-
-    __tablename__ = "next_giveaway"
+    __tablename__ = "giveaway_queue"
     __table_args__ = MYSQL_TABLE_ARGS
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     prize_id: Mapped[int] = mapped_column(ForeignKey("prizes.id"), nullable=False)
     # Null = use whatever --winners the random run was invoked with.
     winner_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    set_by_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    set_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    added_by_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    added_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
 
     prize: Mapped["Prize"] = relationship()
+
+
+class GiveawayEntry(Base):
+    """One row per member who pressed a button giveaway's Enter button."""
+
+    __tablename__ = "giveaway_entries"
+    __table_args__ = (
+        UniqueConstraint("giveaway_id", "discord_id", name="uq_giveaway_entries_giveaway_user"),
+        MYSQL_TABLE_ARGS,
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    giveaway_id: Mapped[int] = mapped_column(ForeignKey("giveaways.id"), nullable=False)
+    discord_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    entered_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RoleMenu(Base):
+    """A role-menu message the bot posted itself via /rolemenu create, so it can re-render
+    the embed listing that message's role_reactions rows. Menus set up with the CLI on
+    someone else's message have no row here; they still work, just without the list."""
+
+    __tablename__ = "role_menus"
+    __table_args__ = MYSQL_TABLE_ARGS
+
+    message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class RoleReaction(Base):

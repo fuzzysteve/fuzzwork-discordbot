@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Fuzzwork bot's giveaway poller heartbeat every 5 minutes
+
+[Timer]
+# Calendar-based, not OnBootSec/OnUnitActiveSec: see the timer gotcha in CLAUDE.md.
+# No Persistent=: a missed check isn't worth catching up, the next one is 5 min away.
+OnCalendar=*:0/5
+
+[Install]
+WantedBy=timers.target
