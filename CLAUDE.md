@@ -52,7 +52,7 @@ whoever (human or Claude) touches it next.
 - `systemd/fuzzworkbot-update-check.{service,timer}` — daily (09:00 Berlin) run of
   `fuzzworkbot-update-check` (`src/fuzzworkbot/update_check.py`): read-only check for
   a newer uv release (`uv self update --dry-run`; uv is a standalone install at
-  `/root/.local/bin/uv`, which both systemd units run through), outdated Python packages (this venv, `/home/scripts/compression`'s and
+  `/root/.local/bin/uv`, which this unit runs through, so it stays root), outdated Python packages (this venv, `/home/scripts/compression`'s and
   `/home/web/fuzzwork/pyapi`'s and `/opt/pricegetter-redis`'s) and direct
   Composer packages (the *live* discord-auth copy), posted to Discord channel
   972857594257498153 via REST with the bot token. Each update (package + latest
@@ -74,6 +74,18 @@ whoever (human or Claude) touches it next.
 
 ## Conventions
 
+- **Runs as `fuzzworkbot`, not root** (since 2026-11-16): `fuzzworkbot.service`,
+  `-random-giveaway` and `-watchdog` have `User=fuzzworkbot` and a systemd sandbox
+  (`ProtectSystem=strict`, `ProtectHome=read-only`, no capabilities; writable only
+  `StateDirectory`/`CacheDirectory` = `/var/lib/fuzzworkbot`, `/var/cache/fuzzworkbot`,
+  where the ESI cache now lives via `XDG_CACHE_HOME`). They run `.venv/bin/...`
+  directly, not `/root/.local/bin/uv run` (the user can't reach `/root`; the venv's
+  interpreter is the system `/usr/bin/python3.12`), so nothing syncs the venv on start:
+  `uv sync` after dependency changes, then restart. The venv and code stay root-owned
+  on purpose. Anything new the bot needs to write must go under those two directories,
+  or the sandbox refuses it. `fuzzworkbot-update-check` alone stays root (root-owned uv,
+  other projects' venvs, Composer caches under `/root`), with a lighter sandbox.
+  `giveaway-cli` run by hand is still root and unaffected.
 - **SQLAlchemy 2.0 idioms only**: declarative `Mapped`/`mapped_column`, `select()` +
   `session.scalar(s)`/`session.get()`, and `session_factory.begin()` as a context
   manager for any write — never rely on session autobegin, and never index a `Row`
@@ -181,7 +193,8 @@ whoever (human or Claude) touches it next.
 
 ## Secrets
 
-- Real secrets live in `.env` (this repo, gitignored, keep `chmod 600`) and in
+- Real secrets live in `.env` (this repo, gitignored, keep it `root:fuzzworkbot` mode
+  `640`, see "Runs as `fuzzworkbot`" under Conventions) and in
   `/home/web/fuzzwork/htdocs/discord-auth/secret.php` (gitignored there too). Never
   write fabricated or placeholder-looking values into either of those two files
   specifically — if you don't have the real value, leave an obvious `<placeholder>`

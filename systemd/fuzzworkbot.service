@@ -7,10 +7,41 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/discordbot
 EnvironmentFile=/home/discordbot/.env
-ExecStart=/root/.local/bin/uv run fuzzworkbot
+# Runs the venv directly (not `uv run`, which lives under /root): after changing
+# dependencies, `uv sync` before restarting.
+ExecStart=/home/discordbot/.venv/bin/fuzzworkbot
 Restart=on-failure
 RestartSec=5
-User=root
+User=fuzzworkbot
+Group=fuzzworkbot
+# /var/lib/fuzzworkbot: poller heartbeat. /var/cache/fuzzworkbot: ESI cache.
+StateDirectory=fuzzworkbot
+CacheDirectory=fuzzworkbot
+Environment=HOME=/var/lib/fuzzworkbot XDG_CACHE_HOME=/var/cache/fuzzworkbot
+# Sandbox: read-only filesystem except the State/CacheDirectory above, no privilege
+# escalation, no capabilities, network + unix sockets only. The venv and code stay
+# root-owned, so the bot can't modify itself. .env is root:fuzzworkbot 640.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

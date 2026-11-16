@@ -62,6 +62,19 @@ uv run fuzzworkbot     # foreground run, Ctrl-C to stop — good for first-time 
 
 ## Running as a service
 
+The bot, the random-giveaway timer and the watchdog run as a dedicated system user,
+`fuzzworkbot`, under a systemd sandbox (read-only filesystem except
+`/var/lib/fuzzworkbot` and `/var/cache/fuzzworkbot`, no privileges). They run the venv
+directly rather than through `uv run`, so after changing dependencies run `uv sync`
+before restarting. Only the dependency-update check still runs as root; see its unit
+for why. One-time setup:
+
+```bash
+sudo useradd --system --user-group --no-create-home --home-dir /var/lib/fuzzworkbot \
+  --shell /usr/sbin/nologin --comment "Fuzzwork Discord bot" fuzzworkbot
+sudo chown root:fuzzworkbot .env && sudo chmod 640 .env   # readable by the bot, not writable
+```
+
 ```bash
 sudo cp systemd/fuzzworkbot.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -333,7 +346,10 @@ member/reaction diff and hasn't been needed so far.
 
 ## Security
 
-- `.env` holds live credentials — it's gitignored and should stay `chmod 600`.
+- `.env` holds live credentials — it's gitignored and should stay `root:fuzzworkbot`,
+  mode `640`: readable by the bot's user, writable only by root, unreadable by anyone
+  else. (`load_dotenv()` fails outright on a `.env` it can't read, even though systemd
+  has already passed the values in, so the bot's group must be able to read it.)
 - `legacy/` holds the pre-rewrite bot files and old venv, kept only as a reference for
   what used to exist. They had a hardcoded bot token and DB password in plaintext;
   those must be treated as compromised regardless of whether this rewrite is deployed.

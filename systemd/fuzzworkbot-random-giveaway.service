@@ -8,4 +8,30 @@ Type=oneshot
 WorkingDirectory=/home/discordbot
 EnvironmentFile=/home/discordbot/.env
 ExecStart=/home/discordbot/.venv/bin/giveaway-cli giveaway random
-User=root
+User=fuzzworkbot
+Group=fuzzworkbot
+Environment=HOME=/var/lib/fuzzworkbot
+# Sandbox: read-only filesystem except the State/CacheDirectory above, no privilege
+# escalation, no capabilities, network + unix sockets only. The venv and code stay
+# root-owned, so the bot can't modify itself. .env is root:fuzzworkbot 640.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077

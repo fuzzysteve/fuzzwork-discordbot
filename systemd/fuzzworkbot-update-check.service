@@ -8,4 +8,18 @@ Type=oneshot
 WorkingDirectory=/home/discordbot
 EnvironmentFile=/home/discordbot/.env
 ExecStart=/root/.local/bin/uv run fuzzworkbot-update-check
+# Deliberately still root, unlike the bot's other units: it runs the root-owned uv
+# (`uv self update --dry-run`), reads three other projects' venvs and runs Composer on
+# the live PHP app, all of which write their caches under /root. So it gets only the
+# sandboxing that leaves /root and /var/lib writable. It's read-only by design.
 User=root
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
