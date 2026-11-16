@@ -2,6 +2,7 @@ import calendar
 import datetime
 import logging
 import random
+import sys
 
 import disnake
 from disnake import OptionChoice
@@ -152,6 +153,9 @@ class Giveaways(commands.Cog):
         # posts whose count changed. In memory only: after a restart every active post is
         # refreshed once.
         self._shown_entrants: dict[int, int] = {}
+        # (when, what failed) of the poller's most recent caught error, for /botstatus.
+        # Caught errors are retried, so the watchdog never sees them; this does.
+        self.last_poller_error: tuple[datetime.datetime, str] | None = None
         self.poll.start()
 
     def cog_unload(self):
@@ -503,6 +507,7 @@ class Giveaways(commands.Cog):
             except Exception:
                 healthy = False
                 logger.exception("Giveaway poller step %s failed; retrying next minute", step.__name__)
+                self._note_poller_error(f"step {step.__name__}")
         if healthy:
             # Only a fully successful run counts, so a lasting DB outage also goes stale
             # and trips fuzzworkbot-watchdog.
@@ -530,6 +535,7 @@ class Giveaways(commands.Cog):
                 await self._post_one(giveaway_id)
             except Exception:
                 logger.exception("Posting giveaway %s failed; will retry", giveaway_id)
+                self._note_poller_error(f"posting giveaway #{giveaway_id}")
 
     async def _post_one(self, giveaway_id: int):
         with self.bot.session_factory.begin() as session:
@@ -592,6 +598,7 @@ class Giveaways(commands.Cog):
                 self._shown_entrants[g["id"]] = g["entrants"]
             except Exception:
                 logger.exception("Updating entrant count for giveaway %s failed; will retry", g["id"])
+                self._note_poller_error(f"updating giveaway #{g['id']}'s entrant count")
 
     async def _finish_active(self):
         now = now_utc()
@@ -605,6 +612,12 @@ class Giveaways(commands.Cog):
                 await self._finish_one(giveaway_id)
             except Exception:
                 logger.exception("Finishing giveaway %s failed; will retry", giveaway_id)
+                self._note_poller_error(f"finishing giveaway #{giveaway_id}")
+
+    def _note_poller_error(self, what: str) -> None:
+        exc = sys.exc_info()[1]
+        detail = f"{type(exc).__name__}: {exc}" if exc else "unknown error"
+        self.last_poller_error = (now_utc(), f"{what}: {detail}"[:300])
 
     def _mark_finished(self, giveaway_id: int):
         with self.bot.session_factory.begin() as session:

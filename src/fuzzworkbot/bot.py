@@ -14,6 +14,7 @@ EXTENSIONS = [
     "fuzzworkbot.cogs.giveaways",
     "fuzzworkbot.cogs.role_reactions",
     "fuzzworkbot.cogs.eve_lookup",
+    "fuzzworkbot.cogs.status",
 ]
 
 

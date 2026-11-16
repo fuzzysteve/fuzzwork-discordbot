@@ -43,6 +43,11 @@ def read_heartbeat() -> datetime.datetime | None:
         return None
 
 
+def is_alerting() -> bool:
+    """Whether a "poller has stopped" alert is open (posted, no recovery posted yet)."""
+    return _load_alerting()
+
+
 def _load_alerting() -> bool:
     try:
         return bool(json.loads(STATE_FILE.read_text()).get("alerting"))

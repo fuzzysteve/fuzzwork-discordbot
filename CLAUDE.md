@@ -38,7 +38,9 @@ whoever (human or Claude) touches it next.
   - `bot.py` — builds the `InteractionBot`, attaches `bot.config` and
     `bot.session_factory`, loads the cogs, entrypoint (`fuzzworkbot` console script).
   - `cogs/verification.py`, `cogs/giveaways.py`, `cogs/role_reactions.py`,
-    `cogs/eve_lookup.py`.
+    `cogs/eve_lookup.py`, `cogs/status.py` (`/botstatus`: read-only health view;
+    reads `.git` files directly rather than running `git`, which refuses a repo owned
+    by another user, and the next timer run via `systemctl list-timers --output=json`).
 - `src/fuzzworkbot_cli/cli.py` — `giveaway-cli` console script (click + questionary).
   Talks to MySQL directly via the same `db.py` models. It never talks to Discord and
   has no connection to the running bot process — see "CLI/bot decoupling" below.

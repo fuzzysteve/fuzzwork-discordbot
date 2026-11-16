@@ -151,6 +151,11 @@ uv run fuzzworkbot-watchdog --dry-run   # what it would post right now
   an emoji and a role. You can only add roles below your own highest role, and below
   the bot's.
 - `/type`, `/system` — EVE item and solar system lookups.
+- `/botstatus` (Manage Server) — private health summary: uptime, commit, gateway
+  latency, poller heartbeat and its last caught error, watchdog state, running and
+  scheduled giveaways, the next timer run and queue head, code stock (prizes with 3 or
+  fewer available listed as low), verified member count, and pending dependency
+  updates from the daily report.
 
 ## Admin CLI (`giveaway-cli`)
 
