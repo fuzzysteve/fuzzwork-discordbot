@@ -41,15 +41,26 @@ curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
 $result = curl_exec($ch);
 
 if ($result===false) {
-    auth_error(curl_error($ch));
+    auth_error('EVE SSO token request failed: '.curl_error($ch));
 }
+$status=curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 curl_close($ch);
+if ($status!==200) {
+    // Typically a reused/expired code (user hit back or refresh).
+    auth_error("EVE SSO token request returned HTTP $status: ".substr($result, 0, 200));
+}
 $response=json_decode($result);
-$auth_token=$response->access_token;
-$jwtexplode=json_decode(base64_decode(str_replace('_', '/', str_replace('-','+',explode('.',$auth_token )[1]))));
+$auth_token=$response->access_token ?? null;
+$jwtparts=is_string($auth_token) ? explode('.', $auth_token) : [];
+// The token came straight from the EVE token endpoint over TLS, so its payload is
+// trusted without verifying the JWT signature.
+$jwtexplode=count($jwtparts)===3 ? json_decode(base64_decode(strtr($jwtparts[1], '-_', '+/'))) : null;
+$subparts=explode(':', $jwtexplode->sub ?? '');
+if (!isset($jwtexplode->name) || count($subparts)!==3 || !ctype_digit($subparts[2])) {
+    auth_error('EVE SSO token had an unexpected shape');
+}
 $charactername=$jwtexplode->name;
-$owner=$jwtexplode->owner;
-$characterid=explode(":",$jwtexplode->sub)[2];
+$characterid=$subparts[2];
 
 // New session ID once the EVE identity is known, so an ID anyone saw before login
 // (or planted) is worthless afterwards.
@@ -63,4 +74,4 @@ $_SESSION['discordstate']=$discordstate;
 
 $discordcallback="https://www.fuzzwork.co.uk/discord-auth/callback2.php";
 
-header('Location: https://discordapp.com/api/oauth2/authorize?response_type=code&client_id='.$discord_clientid.'&scope=identify&state='.$discordstate.'&redirect_uri='.urlencode($discordcallback));
+header('Location: https://discord.com/oauth2/authorize?response_type=code&client_id='.$discord_clientid.'&scope=identify&state='.$discordstate.'&redirect_uri='.urlencode($discordcallback));

@@ -270,3 +270,16 @@ def test_giveaway_random_falls_back_when_next_cant_run(run, session_factory, mak
         new = session.scalar(select(Giveaway).where(Giveaway.prize_id == plex_id))
     assert new is not None
     assert _next_row(session_factory).prize_id == skin_id  # kept for the next run
+
+
+@pytest.mark.parametrize("option", ["--winners", "--duration-hours", "--channel-id"])
+def test_giveaway_random_rejects_non_positive(run, session_factory, make_prize, option):
+    make_prize(name="PLEX", codes=["A"])
+    run("giveaway", "random", option, "0", ok=False)
+    with session_factory() as session:
+        assert session.scalar(select(Giveaway)) is None
+
+
+@pytest.mark.parametrize("value, ok", [("24", True), (" 3 ", True), ("0", False), ("-1", False), ("abc", False), ("", False)])
+def test_positive_int_validator(value, ok):
+    assert (cli._positive_int(value) is True) == ok

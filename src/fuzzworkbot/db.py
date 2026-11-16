@@ -32,8 +32,12 @@ class Base(DeclarativeBase):
 
 class UserLookup(Base):
     __tablename__ = "userlookup"
+    __table_args__ = (UniqueConstraint("discordid", name="uq_userlookup_discordid"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Unique: one EVE character per Discord account. On the live table this is the
+    # hand-added uq_userlookup_discordid key (the older non-unique `discordid` index is
+    # still there too, redundant but harmless).
     discordid: Mapped[int] = mapped_column(BigInteger, nullable=False)
     eveid: Mapped[int] = mapped_column(BigInteger, nullable=False)
 

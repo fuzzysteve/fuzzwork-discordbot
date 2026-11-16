@@ -95,7 +95,11 @@ class RoleReactions(commands.Cog):
         with self.bot.session_factory() as session:
             message_ids = session.scalars(select(RoleReaction.message_id).distinct()).all()
         for message_id in message_ids:
-            await self._reconcile_message(message_id)
+            # One unreadable channel/message (403, Discord 5xx) mustn't stop the rest.
+            try:
+                await self._reconcile_message(message_id)
+            except Exception:
+                logger.exception("Reconciling role reactions for message %s failed", message_id)
 
     async def _reconcile_message(self, message_id: int):
         with self.bot.session_factory() as session:
@@ -116,6 +120,9 @@ class RoleReactions(commands.Cog):
             message = await channel.fetch_message(message_id)
         except disnake.NotFound:
             logger.warning("Role-reaction message %s not found while reconciling", message_id)
+            return
+        except disnake.Forbidden:
+            logger.warning("No access to role-reaction message %s (channel %s) while reconciling", message_id, channel.id)
             return
 
         by_key = {}

@@ -471,6 +471,11 @@ def giveaway():
     """Manage giveaways."""
 
 
+def _positive_int(value: str) -> bool | str:
+    """questionary validator: True, or the error shown under the prompt."""
+    return (value.strip().isdigit() and int(value) > 0) or "Enter a whole number greater than 0."
+
+
 @giveaway.command("create")
 def giveaway_create():
     session_factory, config = _connect()
@@ -491,10 +496,10 @@ def giveaway_create():
     if prize_id is None:
         return
 
-    duration_hours = questionary.text("Duration (hours):", default="24").ask()
-    winners = questionary.text("Number of winners:", default="1").ask()
-    channel_id = questionary.text("Channel ID:").ask()
-    guild_id = questionary.text("Guild ID:", default=str(config.guild_id)).ask()
+    duration_hours = questionary.text("Duration (hours):", default="24", validate=_positive_int).ask()
+    winners = questionary.text("Number of winners:", default="1", validate=_positive_int).ask()
+    channel_id = questionary.text("Channel ID:", validate=_positive_int).ask()
+    guild_id = questionary.text("Guild ID:", default=str(config.guild_id), validate=_positive_int).ask()
     if not duration_hours or not winners or not channel_id or not guild_id:
         click.echo("Cancelled.")
         return
@@ -536,10 +541,10 @@ DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
     "back to a random pick, and keeping the choice for the next run, if it can't be "
     "covered right now. Fully non-interactive — no prompts — for cron/systemd timer use.",
 )
-@click.option("--duration-hours", type=int, default=48, show_default=True)
-@click.option("--winners", type=int, default=1, show_default=True)
-@click.option("--channel-id", type=int, default=DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID, show_default=True)
-@click.option("--guild-id", type=int, default=None, help="Defaults to GUILD_ID from .env.")
+@click.option("--duration-hours", type=click.IntRange(min=1), default=48, show_default=True)
+@click.option("--winners", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("--channel-id", type=click.IntRange(min=1), default=DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID, show_default=True)
+@click.option("--guild-id", type=click.IntRange(min=1), default=None, help="Defaults to GUILD_ID from .env.")
 def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id: int | None):
     session_factory, config = _connect()
     guild_id = guild_id or config.guild_id

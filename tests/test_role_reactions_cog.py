@@ -159,3 +159,25 @@ async def test_reconcile_survives_deleted_message(cog, mapping, guild):
     channel.fetch_message = AsyncMock(side_effect=http_error(disnake.NotFound, 404))
     guild.get_channel.return_value = channel
     await cog._reconcile()
+
+
+async def test_reconcile_continues_past_unreadable_message(cog, session_factory, guild, role):
+    # First message's channel is 403/500; the second must still be reconciled.
+    with session_factory.begin() as session:
+        session.add(RoleReaction(guild_id=1000, channel_id=3001, message_id=501, emoji="👍", role_id=ROLE_ID))
+        session.add(RoleReaction(guild_id=1000, channel_id=3002, message_id=502, emoji="👍", role_id=ROLE_ID))
+    member = _member(10)
+    guild.get_member.side_effect = {10: member}.get
+    forbidden, broken, ok = MagicMock(id=3001), MagicMock(id=3001), MagicMock(id=3002)
+    forbidden.fetch_message = AsyncMock(side_effect=http_error(disnake.Forbidden, 403))
+    ok.fetch_message = AsyncMock(
+        return_value=SimpleNamespace(reactions=[fake_reaction([fake_user(10)], emoji=disnake.PartialEmoji(name="👍"))])
+    )
+
+    for first in (forbidden, broken):
+        if first is broken:
+            broken.fetch_message = AsyncMock(side_effect=http_error(disnake.HTTPException, 500))
+            member.add_roles.reset_mock()
+        guild.get_channel.side_effect = {3001: first, 3002: ok}.get
+        await cog._reconcile()
+        member.add_roles.assert_awaited_once_with(role)

@@ -64,7 +64,8 @@ class Verification(commands.Cog):
 
     @commands.slash_command(guild_ids=[_config.guild_id])
     async def auththem(self, inter: disnake.ApplicationCommandInteraction, user: disnake.User):
-        await inter.response.defer()
+        # Ephemeral: only the asker sees someone else's EVE identity, not the channel.
+        await inter.response.defer(ephemeral=True)
         try:
             eveid = self._lookup_eveid(user.id)
             if eveid is None:

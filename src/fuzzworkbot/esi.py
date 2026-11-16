@@ -13,9 +13,10 @@ def get_session(user_agent: str) -> CachedSession:
             use_cache_dir=True,
             cache_control=True,
             expire_after=timedelta(days=1),
-            allowable_methods=["GET", "POST"],
-            allowable_codes=[200, 400],
-            ignored_parameters=["api_key"],
+            # Only cache successes: a cached error would keep failing /authme for that
+            # character for the whole expire_after window.
+            allowable_methods=["GET"],
+            allowable_codes=[200],
             match_headers=True,
             stale_if_error=True,
             headers={"User-Agent": user_agent},

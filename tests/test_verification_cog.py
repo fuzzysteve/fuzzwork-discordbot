@@ -100,3 +100,21 @@ async def test_auththem_not_linked(cog, esi):
     inter = fake_interaction()
     await cog.auththem.callback(cog, inter, user=SimpleNamespace(id=43, name="nobody", mention="<@43>"))
     assert _reply(inter) == "Auth system doesn't know nobody yet."
+
+
+async def test_auththem_reply_is_private(cog, linked, esi):
+    inter = fake_interaction()
+    await cog.auththem.callback(cog, inter, user=SimpleNamespace(id=42, name="steve", mention="<@42>"))
+    inter.response.defer.assert_awaited_once_with(ephemeral=True)
+
+
+def test_esi_session_caches_only_successful_gets():
+    from fuzzworkbot import esi
+
+    esi._session = None
+    try:
+        settings = esi.get_session("test-agent").settings
+        assert settings.allowable_codes == (200,) or list(settings.allowable_codes) == [200]
+        assert list(settings.allowable_methods) == ["GET"]
+    finally:
+        esi._session = None

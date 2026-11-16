@@ -45,3 +45,15 @@ def test_make_session_factory_creates_all_tables(db_url):
     session_factory = make_session_factory(db_url)
     tables = set(inspect(session_factory.kw["bind"]).get_table_names())
     assert {"userlookup", "prizes", "giveaway_codes", "giveaways", "giveaway_winners", "role_reactions"} <= tables
+
+
+def test_userlookup_discordid_is_unique(session_factory):
+    import sqlalchemy.exc
+
+    from fuzzworkbot.db import UserLookup
+
+    with session_factory.begin() as session:
+        session.add(UserLookup(discordid=1, eveid=100))
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        with session_factory.begin() as session:
+            session.add(UserLookup(discordid=1, eveid=200))
