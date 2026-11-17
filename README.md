@@ -140,6 +140,10 @@ uv run fuzzworkbot-watchdog --dry-run   # what it would post right now
   post shows a live countdown and entrant count.
 - `/giveaway cancel|endnow` (Manage Server) — cancel a scheduled or running giveaway (no
   winners, its reserved codes are freed), or end a running one now and draw immediately.
+- `/giveaway entrants|kick|unkick` (Manage Server) — list who entered a giveaway (latest
+  by default; winners marked, kicked members listed; a long list comes as a CSV file),
+  remove someone and block them from re-entering it, or lift that block. Kicking works
+  until the draw.
 - `/prize list|import` (Manage Server) — code counts per prize (available / reserved;
   prizes with no codes left are hidden unless `show_empty`),
   and importing codes from an attached file: a CSV with `prize`,`code` (and optional
@@ -196,6 +200,10 @@ uv run giveaway-cli giveaway queue list               # next-up first, with #ids
 uv run giveaway-cli giveaway queue remove <id>        # drop one entry
 uv run giveaway-cli giveaway queue clear              # back to random picks
 uv run giveaway-cli giveaway list                    # shows winner(s) for finished giveaways
+uv run giveaway-cli giveaway entrants [<id>]          # who entered (latest by default), winners marked
+uv run giveaway-cli giveaway kick <discord-id> [--giveaway <id>] [--reason "..."]
+                                                      # remove them and block re-entry (latest by default)
+uv run giveaway-cli giveaway unkick <discord-id> [--giveaway <id>]
 uv run giveaway-cli giveaway winners <id>             # winners + their actual codes for one giveaway, CLI-only
 
 uv run giveaway-cli role-menu add \
@@ -343,6 +351,8 @@ member/reaction diff and hasn't been needed so far.
   prize ran out of codes at draw time
 - `giveaway_entries(id, giveaway_id, discord_id, entered_at)` — button entries, unique
   per giveaway and user
+- `giveaway_exclusions(id, giveaway_id, discord_id, reason, excluded_by_discord_id, excluded_at)`
+  — members kicked from a giveaway, who the Enter button refuses
 - `giveaway_queue(id, prize_id, winner_count, added_by_discord_id, added_at)` — prizes
   queued for the timer, used in id order
 - `role_reactions(id, guild_id, channel_id, message_id, emoji, role_id, created_at)`

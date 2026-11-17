@@ -180,6 +180,12 @@ whoever (human or Claude) touches it next.
   buttons survive restarts with no setup. `_finish_one` still reads reactions for
   `"reaction"` giveaways. Entrant counts on posts are refreshed by the poller (only when
   changed), not per click, to stay clear of Discord's message-edit rate limit.
+- Kicking (`giveaway_logic.kick_entrant`, used by `/giveaway kick` and `giveaway-cli
+  giveaway kick`) deletes the `GiveawayEntry` and adds a `GiveawayExclusion`, which
+  `_enter` checks so the member can't just press Enter again. Kick, unkick, `_enter` and
+  `_finish_one`'s phase 2 all lock the `Giveaway` row, and phase 2 re-reads entries and
+  drops exclusions under that lock, so a kick racing a draw can never produce a kicked
+  winner. Keep all four on that lock.
 - The poller writes `/var/lib/fuzzworkbot/poller-heartbeat` after every fully successful
   run. `fuzzworkbot-watchdog` (`src/fuzzworkbot/watchdog.py`, every 5 min via
   `systemd/fuzzworkbot-watchdog.{service,timer}`) posts to channel 972857594257498153

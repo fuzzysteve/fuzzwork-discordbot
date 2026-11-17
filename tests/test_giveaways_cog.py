@@ -718,3 +718,151 @@ async def test_prize_import_rejects_oversized(cog):
     await cog.prize_import.callback(cog, inter, file=big, prize=None)
     assert "too big" in _deferred_reply(inter)
     big.read.assert_not_called()
+
+
+# --- /giveaway entrants | kick | unkick ---------------------------------------------
+
+
+def _button_giveaway(make_prize, make_giveaway, codes=("A",), **kwargs):
+    return make_giveaway(
+        make_prize(name="PLEX", codes=list(codes)),
+        status=STATUS_ACTIVE,
+        message_id=77,
+        ends_at=minutes_ago(-60),
+        entry_mode="button",
+        **kwargs,
+    )
+
+
+async def test_entrants_lists_latest_by_default(cog, session_factory, make_prize, make_giveaway):
+    older = _button_giveaway(make_prize, make_giveaway)
+    latest = make_giveaway(make_prize(name="Skin", codes=["S"]), status=STATUS_ACTIVE, message_id=78, ends_at=minutes_ago(-60), entry_mode="button")
+    for user in (10, 11):
+        await cog.on_button_click(_click(latest, author_id=user))
+    await cog.on_button_click(_click(older, author_id=99))
+
+    inter = fake_interaction()
+    await cog.giveaway_entrants.callback(cog, inter, giveaway=None)
+
+    text = inter.response.send_message.call_args.args[0]
+    lines = text.splitlines()
+    assert lines[0].startswith(f"**#{latest} Skin** (active, ends <t:") and lines[0].endswith("— 2 entrant(s)")
+    assert lines[1].startswith("1. <@10> · <t:") and lines[2].startswith("2. <@11> · <t:")
+    assert "<@99>" not in text
+    assert inter.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
+async def test_entrants_marks_winners_and_kicked(cog, session_factory, make_prize, make_giveaway, monkeypatch):
+    giveaway_id = _button_giveaway(make_prize, make_giveaway)
+    for user in (10, 11, 12):
+        await cog.on_button_click(_click(giveaway_id, author_id=user))
+    await cog.giveaway_kick.callback(cog, fake_interaction(), user=SimpleNamespace(id=12, mention="<@12>"), giveaway=str(giveaway_id), reason="alt account")
+    with session_factory.begin() as session:
+        session.get(Giveaway, giveaway_id).ends_at = minutes_ago(1)
+    cog.bot.get_user = lambda user_id: fake_user(user_id)
+    monkeypatch.setattr(giveaways_module.random, "sample", lambda pool, k: [10][:k])
+    await cog._finish_one(giveaway_id)
+
+    inter = fake_interaction()
+    await cog.giveaway_entrants.callback(cog, inter, giveaway=str(giveaway_id))
+    text = inter.response.send_message.call_args.args[0]
+    assert "(finished) — 2 entrant(s)" in text
+    assert "1. <@10> 🏆 · " in text and "2. <@11> · " in text
+    assert text.splitlines()[-1] == "**Kicked:** <@12> (alt account)"
+
+
+async def test_entrants_of_reaction_giveaway(cog, make_prize, make_giveaway):
+    giveaway_id = make_giveaway(make_prize(codes=["A"]), status=STATUS_FINISHED)
+    inter = fake_interaction()
+    await cog.giveaway_entrants.callback(cog, inter, giveaway=str(giveaway_id))
+    assert "entered by reactions, so its entrants weren't recorded" in inter.response.send_message.call_args.args[0]
+
+
+async def test_entrants_long_list_goes_to_a_file(cog, session_factory, make_prize, make_giveaway):
+    from fuzzworkbot.db import GiveawayEntry, now_utc
+
+    giveaway_id = _button_giveaway(make_prize, make_giveaway)
+    with session_factory.begin() as session:
+        for user in range(100):
+            session.add(GiveawayEntry(giveaway_id=giveaway_id, discord_id=10**17 + user, entered_at=now_utc()))
+
+    inter = fake_interaction()
+    await cog.giveaway_entrants.callback(cog, inter, giveaway=str(giveaway_id))
+
+    call = inter.response.send_message.call_args
+    assert "100 entrant(s). Too many to list here" in call.args[0]
+    content = call.kwargs["file"].fp.getvalue().decode().splitlines()
+    assert content[0] == "n,discord_id,entered_at_utc,winner" and len(content) == 101
+    assert call.kwargs["file"].filename == f"giveaway-{giveaway_id}-entrants.csv"
+
+
+async def test_kick_removes_entry_and_blocks_reentry(cog, session_factory, make_prize, make_giveaway):
+    giveaway_id = _button_giveaway(make_prize, make_giveaway)
+    await cog.on_button_click(_click(giveaway_id, author_id=10))
+    user = SimpleNamespace(id=10, mention="<@10>")
+
+    inter = fake_interaction(author_id=42)
+    await cog.giveaway_kick.callback(cog, inter, user=user, giveaway=str(giveaway_id), reason=None)
+    assert inter.response.send_message.call_args.args[0] == f"Removed <@10> from giveaway #{giveaway_id}; they can't re-enter it."
+    assert _entries(session_factory, giveaway_id) == []
+
+    again = _click(giveaway_id, author_id=10)
+    await cog.on_button_click(again)
+    assert "removed from this giveaway" in again.response.send_message.call_args.args[0]
+    assert _entries(session_factory, giveaway_id) == []
+
+    inter = fake_interaction()
+    await cog.giveaway_kick.callback(cog, inter, user=user, giveaway=str(giveaway_id), reason=None)
+    assert "already kicked" in inter.response.send_message.call_args.args[0]
+
+    inter = fake_interaction()
+    await cog.giveaway_unkick.callback(cog, inter, user=user, giveaway=str(giveaway_id))
+    assert "can enter giveaway" in inter.response.send_message.call_args.args[0]
+    await cog.on_button_click(_click(giveaway_id, author_id=10))
+    assert _entries(session_factory, giveaway_id) == [10]
+
+    inter = fake_interaction()
+    await cog.giveaway_unkick.callback(cog, inter, user=user, giveaway=str(giveaway_id))
+    assert "isn't kicked" in inter.response.send_message.call_args.args[0]
+
+
+async def test_kick_someone_who_never_entered_pre_blocks_them(cog, session_factory, make_prize, make_giveaway):
+    giveaway_id = _button_giveaway(make_prize, make_giveaway)
+    inter = fake_interaction()
+    await cog.giveaway_kick.callback(cog, inter, user=SimpleNamespace(id=10, mention="<@10>"), giveaway=None, reason=None)
+    assert "hadn't entered" in inter.response.send_message.call_args.args[0]
+    click = _click(giveaway_id, author_id=10)
+    await cog.on_button_click(click)
+    assert "can't enter it" in click.response.send_message.call_args.args[0]
+
+
+@pytest.mark.parametrize("status, expected", [(STATUS_FINISHED, "already been drawn"), ("cancelled", "was cancelled")])
+async def test_kick_refused_after_draw_or_cancel(cog, session_factory, make_prize, make_giveaway, status, expected):
+    giveaway_id = make_giveaway(make_prize(codes=["A"]), status=status, entry_mode="button")
+    inter = fake_interaction()
+    await cog.giveaway_kick.callback(cog, inter, user=SimpleNamespace(id=10, mention="<@10>"), giveaway=str(giveaway_id), reason=None)
+    assert expected in inter.response.send_message.call_args.args[0]
+
+
+async def test_kick_during_draw_is_never_drawn(cog, channel, session_factory, make_prize, make_giveaway):
+    """A kick landing between the draw's unlocked read and its locked draw must still win."""
+    from fuzzworkbot.giveaway_logic import kick_entrant
+
+    giveaway_id = _button_giveaway(make_prize, make_giveaway, codes=("A", "B"), winner_count=2)
+    for user in (10, 11):
+        await cog.on_button_click(_click(giveaway_id, author_id=user))
+    with session_factory.begin() as session:
+        session.get(Giveaway, giveaway_id).ends_at = minutes_ago(1)
+    cog.bot.get_user = lambda user_id: fake_user(user_id)
+
+    guild = cog.bot.get_guild(1000)
+
+    def kick_then_guild(guild_id):  # called by _finish_one after phase 1's read
+        with session_factory.begin() as session:
+            kick_entrant(session, giveaway_id, 11, "<@11>")
+        return guild
+
+    cog.bot.get_guild = kick_then_guild
+    await cog._finish_one(giveaway_id)
+
+    assert [w.discord_id for w in _winners(session_factory, giveaway_id)] == [10]

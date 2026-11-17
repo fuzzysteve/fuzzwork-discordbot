@@ -338,3 +338,26 @@ def test_prize_list_hides_empty_unless_all(run, session_factory, make_prize, mak
 
     output = run("prize", "list", "--all").output
     assert "Empty" in output and "hidden" not in output
+
+
+def test_giveaway_entrants_kick_unkick(run, session_factory, make_prize, make_giveaway):
+    from fuzzworkbot.db import GiveawayEntry, now_utc
+
+    giveaway_id = make_giveaway(make_prize(name="PLEX", codes=["A"]), status=STATUS_ACTIVE, message_id=1, entry_mode="button")
+    with session_factory.begin() as session:
+        session.add(GiveawayEntry(giveaway_id=giveaway_id, discord_id=10, entered_at=now_utc()))
+        session.add(GiveawayEntry(giveaway_id=giveaway_id, discord_id=11, entered_at=now_utc()))
+
+    output = run("giveaway", "entrants").output  # latest by default
+    assert f"Giveaway {giveaway_id} — PLEX (active" in output and "2 entrant(s)" in output
+    assert "user10" in output and "user11" in output
+
+    assert f"Removed 11 (user11) from giveaway #{giveaway_id}" in run("giveaway", "kick", "11", "--reason", "alt").output
+    output = run("giveaway", "entrants", str(giveaway_id)).output
+    assert "1 entrant(s)" in output and "Kicked:" in output and "user11" in output and "— alt" in output
+    assert "already kicked" in run("giveaway", "kick", "11", ok=False).output
+
+    assert "can enter giveaway" in run("giveaway", "unkick", "11", "--giveaway", str(giveaway_id)).output
+    assert "isn't kicked" in run("giveaway", "unkick", "11", ok=False).output
+    run("giveaway", "kick", "0", ok=False)  # not a real Discord ID
+    run("giveaway", "entrants", "999", ok=False)

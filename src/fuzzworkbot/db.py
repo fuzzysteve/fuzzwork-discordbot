@@ -167,6 +167,25 @@ class GiveawayEntry(Base):
     entered_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
 
 
+class GiveawayExclusion(Base):
+    """A member an admin kicked from a giveaway (/giveaway kick, `giveaway-cli giveaway
+    kick`): their entry is deleted and the Enter button refuses them from then on.
+    Deleting the row (unkick) lets them enter again; it doesn't restore the old entry."""
+
+    __tablename__ = "giveaway_exclusions"
+    __table_args__ = (
+        UniqueConstraint("giveaway_id", "discord_id", name="uq_giveaway_exclusions_giveaway_user"),
+        MYSQL_TABLE_ARGS,
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    giveaway_id: Mapped[int] = mapped_column(ForeignKey("giveaways.id"), nullable=False)
+    discord_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    excluded_by_discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    excluded_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+
+
 class RoleMenu(Base):
     """A role-menu message the bot posted itself via /rolemenu create, so it can re-render
     the embed listing that message's role_reactions rows. Menus set up with the CLI on

@@ -27,7 +27,11 @@ from fuzzworkbot.giveaway_logic import (
     parse_start_time,
     clear_giveaway_queue,
     describe_queued,
+    entrant_list,
     giveaway_queue,
+    kick_entrant,
+    latest_giveaway_id,
+    unkick_entrant,
     queue_giveaway,
     remove_queued_giveaway,
     unused_code_count,
@@ -705,6 +709,74 @@ def giveaway_list():
             else:
                 detail = f"channel={g.channel_id} ends_at={g.ends_at} UTC winners_wanted={g.winner_count}"
             click.echo(f"{g.id:>4}  {g.status:<9} prize={prize_name:<25} {detail}")
+
+
+@giveaway.command("entrants")
+@click.argument("giveaway_id", type=int, required=False, default=None)
+def giveaway_entrants(giveaway_id: int | None):
+    """Who has entered a giveaway, oldest first (the latest giveaway if GIVEAWAY_ID is
+    omitted). Winners are marked, and kicked members listed after."""
+    session_factory, config = _connect()
+    with session_factory() as session:
+        giveaway_id = giveaway_id if giveaway_id is not None else latest_giveaway_id(session)
+        listing = entrant_list(session, giveaway_id) if giveaway_id is not None else None
+    if listing is None:
+        click.echo("No such giveaway." if giveaway_id is not None else "No giveaways yet.", err=True)
+        sys.exit(1)
+
+    ends = f", ends {listing.ends_at} UTC" if listing.ends_at and listing.status == "active" else ""
+    click.echo(f"Giveaway {listing.giveaway_id} — {listing.prize_name} ({listing.status}{ends}): {len(listing.entrants)} entrant(s)")
+    if not listing.stored:
+        click.echo("  Entered by reactions, so its entrants weren't recorded.")
+        return
+    cache: dict[int, str] = {}
+    for n, (discord_id, entered) in enumerate(listing.entrants, start=1):
+        name = _resolve_username(discord_id, config.discord_bot_token, cache)
+        won = "  WINNER" if discord_id in listing.winners else ""
+        click.echo(f"{n:>4}. {entered:%Y-%m-%d %H:%M} UTC  {name:<24} {discord_id}{won}")
+    if listing.kicked:
+        click.echo("  Kicked:")
+        for k in listing.kicked:
+            name = _resolve_username(k.discord_id, config.discord_bot_token, cache)
+            reason = f" — {k.reason}" if k.reason else ""
+            click.echo(f"        {k.excluded_at:%Y-%m-%d %H:%M} UTC  {name:<24} {k.discord_id}{reason}")
+
+
+@giveaway.command("kick")
+@click.argument("discord_id", type=click.IntRange(min=1))
+@click.option("--giveaway", "giveaway_id", type=int, default=None, help="Giveaway ID; defaults to the latest.")
+@click.option("--reason", default=None, help="Optional note, shown in 'giveaway entrants'.")
+def giveaway_kick(discord_id: int, giveaway_id: int | None, reason: str | None):
+    """Remove someone from a giveaway and block them from re-entering it."""
+    session_factory, config = _connect()
+    who = f"{discord_id} ({_resolve_username(discord_id, config.discord_bot_token, {})})"
+    with session_factory.begin() as session:
+        giveaway_id = giveaway_id if giveaway_id is not None else latest_giveaway_id(session)
+        if giveaway_id is None:
+            click.echo("No giveaways yet.", err=True)
+            sys.exit(1)
+        changed, message = kick_entrant(session, giveaway_id, discord_id, who, reason=reason)
+    click.echo(message, err=not changed)
+    if not changed:
+        sys.exit(1)
+
+
+@giveaway.command("unkick")
+@click.argument("discord_id", type=click.IntRange(min=1))
+@click.option("--giveaway", "giveaway_id", type=int, default=None, help="Giveaway ID; defaults to the latest.")
+def giveaway_unkick(discord_id: int, giveaway_id: int | None):
+    """Let someone you kicked enter a giveaway again."""
+    session_factory, config = _connect()
+    who = f"{discord_id} ({_resolve_username(discord_id, config.discord_bot_token, {})})"
+    with session_factory.begin() as session:
+        giveaway_id = giveaway_id if giveaway_id is not None else latest_giveaway_id(session)
+        if giveaway_id is None:
+            click.echo("No giveaways yet.", err=True)
+            sys.exit(1)
+        changed, message = unkick_entrant(session, giveaway_id, discord_id, who)
+    click.echo(message, err=not changed)
+    if not changed:
+        sys.exit(1)
 
 
 @giveaway.command("winners")

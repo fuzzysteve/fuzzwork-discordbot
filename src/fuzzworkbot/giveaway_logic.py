@@ -1,13 +1,20 @@
 import datetime
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fuzzworkbot.db import (
+    ENTRY_BUTTON,
     STATUS_ACTIVE,
+    STATUS_CANCELLED,
+    STATUS_FINISHED,
     STATUS_PENDING,
     Giveaway,
     GiveawayCode,
+    GiveawayEntry,
+    GiveawayExclusion,
+    GiveawayWinner,
     QueuedGiveaway,
     Prize,
     now_utc,
@@ -128,3 +135,131 @@ def clear_giveaway_queue(session: Session) -> int:
 def describe_queued(row: QueuedGiveaway) -> str:
     winners = f"{row.winner_count} winner(s)" if row.winner_count else "default winners"
     return f"#{row.id} {row.prize.name} ({winners})"
+
+
+# --- entrants and kicking ---------------------------------------------------------
+# Shared by `giveaway-cli giveaway entrants|kick|unkick` and `/giveaway entrants|kick|
+# unkick`. Kick and unkick lock the Giveaway row, as _finish_one's draw does, so a kick
+# can't interleave with a draw: either it lands first and the draw (which re-reads
+# entries under that lock) never sees the entrant, or the draw lands first and the kick
+# is refused as already drawn.
+
+
+@dataclass
+class EntrantList:
+    giveaway_id: int
+    prize_name: str
+    status: str
+    ends_at: datetime.datetime | None
+    stored: bool  # False for reaction giveaways: their entrants were never recorded
+    entrants: list[tuple[int, datetime.datetime]]  # (discord_id, entered_at), oldest first
+    winners: set[int]
+    kicked: list[GiveawayExclusion]
+
+
+def latest_giveaway_id(session: Session) -> int | None:
+    return session.scalar(select(func.max(Giveaway.id)))
+
+
+def entrant_list(session: Session, giveaway_id: int) -> EntrantList | None:
+    giveaway = session.get(Giveaway, giveaway_id)
+    if giveaway is None:
+        return None
+    return EntrantList(
+        giveaway_id=giveaway.id,
+        prize_name=session.get(Prize, giveaway.prize_id).name,
+        status=giveaway.status,
+        ends_at=giveaway.ends_at,
+        # Pending giveaways haven't been posted yet; once posted they're button ones.
+        stored=giveaway.entry_mode == ENTRY_BUTTON or giveaway.status == STATUS_PENDING,
+        entrants=[
+            (e.discord_id, e.entered_at)
+            for e in session.scalars(
+                select(GiveawayEntry).where(GiveawayEntry.giveaway_id == giveaway_id).order_by(GiveawayEntry.entered_at)
+            )
+        ],
+        winners=set(session.scalars(select(GiveawayWinner.discord_id).where(GiveawayWinner.giveaway_id == giveaway_id))),
+        kicked=list(
+            session.scalars(
+                select(GiveawayExclusion).where(GiveawayExclusion.giveaway_id == giveaway_id).order_by(GiveawayExclusion.excluded_at)
+            )
+        ),
+    )
+
+
+def _lock_open_giveaway(session: Session, giveaway_id: int) -> Giveaway | str:
+    giveaway = session.scalar(select(Giveaway).where(Giveaway.id == giveaway_id).with_for_update())
+    if giveaway is None:
+        return f"No giveaway #{giveaway_id}."
+    if giveaway.status == STATUS_FINISHED:
+        return f"Giveaway #{giveaway_id} has already been drawn."
+    if giveaway.status == STATUS_CANCELLED:
+        return f"Giveaway #{giveaway_id} was cancelled."
+    if giveaway.status == STATUS_ACTIVE and giveaway.entry_mode != ENTRY_BUTTON:
+        return f"Giveaway #{giveaway_id} is entered by reactions; remove their reaction on its post instead."
+    return giveaway
+
+
+def kick_entrant(
+    session: Session,
+    giveaway_id: int,
+    discord_id: int,
+    who: str,
+    *,
+    reason: str | None = None,
+    kicked_by_discord_id: int | None = None,
+) -> tuple[bool, str]:
+    """Delete `discord_id`'s entry and block them from re-entering. `who` names them in
+    the message. Must be called inside a write transaction. Returns (changed, message)."""
+    giveaway = _lock_open_giveaway(session, giveaway_id)
+    if isinstance(giveaway, str):
+        return False, giveaway
+    entry = session.scalar(
+        select(GiveawayEntry).where(GiveawayEntry.giveaway_id == giveaway_id, GiveawayEntry.discord_id == discord_id)
+    )
+    blocked = session.scalar(
+        select(GiveawayExclusion).where(GiveawayExclusion.giveaway_id == giveaway_id, GiveawayExclusion.discord_id == discord_id)
+    )
+    if entry is None and blocked is not None:
+        return False, f"{who} is already kicked from giveaway #{giveaway_id}."
+    if entry is not None:
+        session.delete(entry)
+    if blocked is None:
+        session.add(
+            GiveawayExclusion(
+                giveaway_id=giveaway_id,
+                discord_id=discord_id,
+                reason=reason,
+                excluded_by_discord_id=kicked_by_discord_id,
+                excluded_at=now_utc(),
+            )
+        )
+    if entry is None:
+        return True, f"{who} hadn't entered giveaway #{giveaway_id}; they're now blocked from entering it."
+    return True, f"Removed {who} from giveaway #{giveaway_id}; they can't re-enter it."
+
+
+def unkick_entrant(session: Session, giveaway_id: int, discord_id: int, who: str) -> tuple[bool, str]:
+    """Lift a kick, so `discord_id` can press Enter again (their old entry isn't
+    restored). Must be called inside a write transaction. Returns (changed, message)."""
+    giveaway = _lock_open_giveaway(session, giveaway_id)
+    if isinstance(giveaway, str):
+        return False, giveaway
+    blocked = session.scalar(
+        select(GiveawayExclusion).where(GiveawayExclusion.giveaway_id == giveaway_id, GiveawayExclusion.discord_id == discord_id)
+    )
+    if blocked is None:
+        return False, f"{who} isn't kicked from giveaway #{giveaway_id}."
+    session.delete(blocked)
+    return True, f"{who} can enter giveaway #{giveaway_id} again (their old entry isn't restored)."
+
+
+def is_excluded(session: Session, giveaway_id: int, discord_id: int) -> bool:
+    return (
+        session.scalar(
+            select(GiveawayExclusion.id).where(
+                GiveawayExclusion.giveaway_id == giveaway_id, GiveawayExclusion.discord_id == discord_id
+            )
+        )
+        is not None
+    )

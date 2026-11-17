@@ -1,5 +1,6 @@
 import calendar
 import datetime
+import io
 import logging
 import random
 import sys
@@ -22,6 +23,7 @@ from fuzzworkbot.db import (
     Giveaway,
     GiveawayCode,
     GiveawayEntry,
+    GiveawayExclusion,
     GiveawayWinner,
     Prize,
     now_utc,
@@ -32,7 +34,12 @@ from fuzzworkbot.giveaway_logic import (
     committed_winner_count,
     unused_code_count,
     describe_queued,
+    entrant_list,
     giveaway_queue,
+    is_excluded,
+    kick_entrant,
+    latest_giveaway_id,
+    unkick_entrant,
     parse_start_time,
     queue_giveaway,
     remove_queued_giveaway,
@@ -85,6 +92,24 @@ async def autocomplete_open_giveaways(inter: disnake.ApplicationCommandInteracti
         else:
             when = "about to post"
         label = f"#{g['id']} {g['name']} ({when})"[:100]
+        if user_input.lower() in label.lower():
+            choices.append(OptionChoice(name=label, value=str(g["id"])))
+    return choices[:25]
+
+
+async def autocomplete_recent_giveaways(inter: disnake.ApplicationCommandInteraction, user_input: str) -> list[OptionChoice]:
+    """The 25 newest giveaways in any state, for /giveaway entrants."""
+    with inter.bot.session_factory() as session:
+        rows = session.execute(
+            select(Giveaway.id, Giveaway.status, Prize.name)
+            .join(Prize, Prize.id == Giveaway.prize_id)
+            .order_by(Giveaway.id.desc())
+            .limit(100)
+        ).all()
+    choices = []
+    for row in rows:
+        g = row._mapping
+        label = f"#{g['id']} {g['name']} ({g['status']})"[:100]
         if user_input.lower() in label.lower():
             choices.append(OptionChoice(name=label, value=str(g["id"])))
     return choices[:25]
@@ -309,6 +334,93 @@ class Giveaways(commands.Cog):
             return
         await inter.edit_original_response(f"Giveaway #{giveaway_id} ended and its winners were drawn and announced.")
 
+    @giveaway.sub_command(name="entrants", description="Who has entered a giveaway (the latest one by default).")
+    async def giveaway_entrants(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        giveaway: str = commands.Param(default=None, autocomplete=autocomplete_recent_giveaways),
+    ):
+        with self.bot.session_factory() as session:
+            giveaway_id = int(giveaway) if giveaway and giveaway.isdigit() else latest_giveaway_id(session)
+            listing = entrant_list(session, giveaway_id) if giveaway_id is not None else None
+        if listing is None:
+            await inter.response.send_message("No such giveaway.", ephemeral=True)
+            return
+
+        header = f"**#{listing.giveaway_id} {listing.prize_name}** ({listing.status}"
+        if listing.ends_at and listing.status == STATUS_ACTIVE:
+            header += f", ends {_discord_timestamp(listing.ends_at, 'R')}"
+        header += f") — {len(listing.entrants)} entrant(s)"
+        if not listing.stored:
+            await inter.response.send_message(
+                f"{header}\nThis giveaway was entered by reactions, so its entrants weren't recorded.",
+                ephemeral=True,
+            )
+            return
+
+        lines = [
+            f"{n}. <@{discord_id}>{' 🏆' if discord_id in listing.winners else ''} · {_discord_timestamp(entered, 'f')}"
+            for n, (discord_id, entered) in enumerate(listing.entrants, start=1)
+        ]
+        if not lines:
+            lines = ["No one has entered yet."]
+        if listing.kicked:
+            lines.append("")
+            lines.append("**Kicked:** " + ", ".join(f"<@{k.discord_id}>" + (f" ({k.reason})" if k.reason else "") for k in listing.kicked))
+        body = "\n".join(lines)
+
+        # Mentions render as names in a private reply without pinging anyone. Past
+        # Discord's message limit, send the list as a file of IDs instead.
+        if len(header) + len(body) + 1 <= 1900:
+            await inter.response.send_message(
+                f"{header}\n{body}", ephemeral=True, allowed_mentions=disnake.AllowedMentions.none()
+            )
+            return
+        rows = ["n,discord_id,entered_at_utc,winner"] + [
+            f"{n},{discord_id},{entered:%Y-%m-%d %H:%M},{'yes' if discord_id in listing.winners else ''}"
+            for n, (discord_id, entered) in enumerate(listing.entrants, start=1)
+        ]
+        await inter.response.send_message(
+            f"{header}. Too many to list here, so they're in the attached file.",
+            file=disnake.File(io.BytesIO("\n".join(rows).encode()), filename=f"giveaway-{listing.giveaway_id}-entrants.csv"),
+            ephemeral=True,
+        )
+
+    @giveaway.sub_command(name="kick", description="Remove someone from a giveaway and stop them re-entering it.")
+    async def giveaway_kick(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        user: disnake.User,
+        giveaway: str = commands.Param(default=None, autocomplete=autocomplete_open_giveaways),
+        reason: str = commands.Param(default=None, max_length=255, description="Optional; shown in /giveaway entrants."),
+    ):
+        with self.bot.session_factory.begin() as session:
+            giveaway_id = int(giveaway) if giveaway and giveaway.isdigit() else latest_giveaway_id(session)
+            if giveaway_id is None:
+                changed, message = False, "No giveaways yet."
+            else:
+                changed, message = kick_entrant(
+                    session, giveaway_id, user.id, user.mention, reason=reason, kicked_by_discord_id=inter.author.id
+                )
+        if changed:
+            logger.info("giveaway kick by %s: %s (reason: %s)", inter.author.id, message, reason)
+        await inter.response.send_message(message, ephemeral=True, allowed_mentions=disnake.AllowedMentions.none())
+
+    @giveaway.sub_command(name="unkick", description="Let someone you kicked enter a giveaway again.")
+    async def giveaway_unkick(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        user: disnake.User,
+        giveaway: str = commands.Param(default=None, autocomplete=autocomplete_open_giveaways),
+    ):
+        with self.bot.session_factory.begin() as session:
+            giveaway_id = int(giveaway) if giveaway and giveaway.isdigit() else latest_giveaway_id(session)
+            if giveaway_id is None:
+                message = "No giveaways yet."
+            else:
+                _, message = unkick_entrant(session, giveaway_id, user.id, user.mention)
+        await inter.response.send_message(message, ephemeral=True, allowed_mentions=disnake.AllowedMentions.none())
+
     @commands.slash_command(
         guild_ids=[_config.guild_id],
         description="Giveaway prizes and their codes.",
@@ -478,9 +590,13 @@ class Giveaways(commands.Cog):
     def _enter(self, giveaway_id: int, discord_id: int) -> str:
         try:
             with self.bot.session_factory.begin() as session:
-                giveaway = session.get(Giveaway, giveaway_id)
+                # Locked like kick_entrant and the draw, so a click can't slip an entry
+                # in between a kick's delete and its block.
+                giveaway = session.scalar(select(Giveaway).where(Giveaway.id == giveaway_id).with_for_update())
                 if giveaway is None or giveaway.status != STATUS_ACTIVE or giveaway.ends_at <= now_utc():
                     return "Sorry, this giveaway has ended."
+                if is_excluded(session, giveaway_id, discord_id):
+                    return "Sorry, you've been removed from this giveaway and can't enter it."
                 already = session.scalar(
                     select(GiveawayEntry.id).where(
                         GiveawayEntry.giveaway_id == giveaway_id, GiveawayEntry.discord_id == discord_id
@@ -675,6 +791,16 @@ class Giveaways(commands.Cog):
             if giveaway is None or giveaway.status != STATUS_ACTIVE:
                 return
             winner_count = giveaway.winner_count
+            # Re-read under the lock: a kick (which takes the same lock) may have landed
+            # since phase 1, and a kicked member must never be drawn.
+            if uses_button:
+                entrant_ids = list(
+                    session.scalars(select(GiveawayEntry.discord_id).where(GiveawayEntry.giveaway_id == giveaway_id))
+                )
+            excluded = set(
+                session.scalars(select(GiveawayExclusion.discord_id).where(GiveawayExclusion.giveaway_id == giveaway_id))
+            )
+            entrant_ids = [i for i in entrant_ids if i not in excluded]
             for winner_id in random.sample(entrant_ids, min(winner_count, len(entrant_ids))):
                 code_row = session.scalar(
                     select(GiveawayCode)
