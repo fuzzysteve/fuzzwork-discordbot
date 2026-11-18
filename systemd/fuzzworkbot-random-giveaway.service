@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/home/discordbot
 EnvironmentFile=/home/discordbot/.env
-ExecStart=/home/discordbot/.venv/bin/giveaway-cli giveaway random
+ExecStart=/home/discordbot/.venv/bin/giveaway-cli giveaway random --only-if-idle
 User=fuzzworkbot
 Group=fuzzworkbot
 Environment=HOME=/var/lib/fuzzworkbot

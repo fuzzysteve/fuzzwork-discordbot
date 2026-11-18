@@ -2,19 +2,21 @@
 Description=Periodically create a random Fuzzwork giveaway
 
 [Timer]
-# Matches giveaway-cli giveaway random's own default --duration-hours (48), so a new
-# one starts roughly as the previous one wraps up. Change both together if you want a
-# different cadence, or add an explicit --duration-hours to ExecStart in the .service
-# to decouple them.
+# Hourly check, not a fixed 48h interval: the service runs `giveaway random
+# --only-if-idle`, which creates nothing while the channel still has a pending or
+# active giveaway. So a new giveaway starts within an hour of the previous one ending,
+# whatever its duration.
 #
-# Deliberately no OnBootSec=: on a long-uptime box, a short OnBootSec is already
-# "elapsed" relative to actual boot time the moment the timer is enabled, and combined
-# with Persistent=true that makes systemd treat it as a missed run and fire immediately
-# on enable — found this the hard way (enabling the timer alone created a real,
-# unplanned giveaway). OnUnitActiveSec alone waits the full interval before the first
-# run, which is what's actually wanted here. Persistent=true still means a boundary
-# missed while the box was down gets caught up promptly after the next boot.
-OnUnitActiveSec=48h
+# This replaced OnUnitActiveSec=48h, which counts from the service's last activation
+# *in the current boot*: after a reboot (2026-11-18) the service had never run, so the
+# timer had no reference point and never fired again (NextElapse=infinity). Persistent=
+# only catches up OnCalendar= runs, not OnUnitActiveSec=, so it didn't help.
+#
+# Persistent=true with OnCalendar= is safe here (unlike the old OnBootSec= setup, which
+# fired an unplanned giveaway on enable): a catch-up run after boot or on enable just
+# hits the idle check, so it can only ever start a giveaway when none is running.
+OnCalendar=hourly
+RandomizedDelaySec=2min
 Persistent=true
 
 [Install]

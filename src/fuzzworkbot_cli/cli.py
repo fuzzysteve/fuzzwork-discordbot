@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from fuzzworkbot.code_import import CodeFileError, import_codes, parse_code_csv
 from fuzzworkbot.config import Config, load_config
 from fuzzworkbot.db import (
+    STATUS_ACTIVE,
     STATUS_CANCELLED,
     STATUS_FINISHED,
     STATUS_PENDING,
@@ -517,15 +518,35 @@ DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID = 825889984120356894
     "can run right now, removing it from the queue. Queued prizes that can't run yet "
     "are skipped and kept. With nothing runnable queued, picks a random active prize "
     "with enough available codes for the requested winner count. Fully "
-    "non-interactive — no prompts — for cron/systemd timer use.",
+    "non-interactive — no prompts — for cron/systemd timer use. With --only-if-idle, "
+    "does nothing (exit 0) while the channel already has a pending or active giveaway.",
 )
 @click.option("--duration-hours", type=click.IntRange(min=1), default=48, show_default=True)
 @click.option("--winners", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--channel-id", type=click.IntRange(min=1), default=DEFAULT_RANDOM_GIVEAWAY_CHANNEL_ID, show_default=True)
 @click.option("--guild-id", type=click.IntRange(min=1), default=None, help="Defaults to GUILD_ID from .env.")
-def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id: int | None):
+@click.option(
+    "--only-if-idle",
+    is_flag=True,
+    help="Create nothing if the channel already has a pending (incl. scheduled) or active "
+    "giveaway. Used by the systemd timer, which runs hourly so a new giveaway starts soon "
+    "after the last one ends, with no fixed interval for a reboot to lose.",
+)
+def giveaway_random(duration_hours: int, winners: int, channel_id: int, guild_id: int | None, only_if_idle: bool):
     session_factory, config = _connect()
     guild_id = guild_id or config.guild_id
+
+    if only_if_idle:
+        with session_factory() as session:
+            running = session.scalar(
+                select(Giveaway.id)
+                .where(Giveaway.channel_id == channel_id)
+                .where(Giveaway.status.in_([STATUS_PENDING, STATUS_ACTIVE]))
+                .limit(1)
+            )
+        if running is not None:
+            click.echo(f"Giveaway #{running} is still pending/active in channel {channel_id}. Nothing created.")
+            return
 
     with session_factory.begin() as session:
         for queued in session.scalars(select(QueuedGiveaway).order_by(QueuedGiveaway.id).with_for_update()).all():

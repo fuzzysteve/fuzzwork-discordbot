@@ -65,12 +65,12 @@ def make_prize(session_factory):
 
 @pytest.fixture
 def make_giveaway(session_factory):
-    def _make(prize_id, status=STATUS_PENDING, winner_count=1, duration_hours=24, **kwargs):
+    def _make(prize_id, status=STATUS_PENDING, winner_count=1, duration_hours=24, channel_id=3000, **kwargs):
         with session_factory.begin() as session:
             giveaway = Giveaway(
                 prize_id=prize_id,
                 guild_id=1000,
-                channel_id=3000,
+                channel_id=channel_id,
                 duration_hours=duration_hours,
                 winner_count=winner_count,
                 status=status,

@@ -102,14 +102,17 @@ systemctl list-timers fuzzworkbot-random-giveaway.timer   # confirm the next sch
 journalctl -u fuzzworkbot-random-giveaway.service -f       # each run's output
 ```
 
-The timer fires every 48h (`OnUnitActiveSec=48h`, matching `giveaway random`'s own
-default `--duration-hours`, so a new one starts roughly as the previous wraps up) —
-**deliberately with no `OnBootSec=`**. A short `OnBootSec` on a box with real uptime is
-already "elapsed" the moment the timer is enabled, and combined with `Persistent=true`
-that makes systemd treat it as a missed run and fire *immediately* on enable — this
-created two unplanned real giveaways the first time this was set up. Don't add
-`OnBootSec=` back without a large value; `OnUnitActiveSec` alone correctly waits the
-full interval before its first run.
+The timer fires hourly (`OnCalendar=hourly`, `Persistent=true`) and the service runs
+`giveaway random --only-if-idle`, which creates nothing while the target channel still
+has a pending (including scheduled) or active giveaway. So a new giveaway starts within
+about an hour of the previous one ending, and a reboot can't lose the schedule or cause
+a duplicate. A manual giveaway in that channel also holds off the random one until it
+ends.
+
+(It used to be `OnUnitActiveSec=48h`. That counts from the service's last run in the
+*current boot*, so after a reboot the timer never fired again. An earlier `OnBootSec=`
+variant fired an unplanned giveaway the moment the timer was enabled. The idle check
+makes either kind of surprise run harmless.)
 
 To choose what the timer runs create instead of leaving them random, queue prizes with
 `/giveawayqueue add` in Discord (Manage Server permission) or `giveaway-cli giveaway

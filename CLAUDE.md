@@ -98,16 +98,18 @@ whoever (human or Claude) touches it next.
   failed auth in a way that looked like a grants problem, not a code problem). If you
   ever need the real connection string from a `URL` object, use
   `.render_as_string(hide_password=False)`.
-- **systemd timer gotcha**: on a box with real (long) uptime, a `.timer` unit with a
-  short `OnBootSec=` is already "elapsed" relative to actual boot the instant the timer
-  is enabled — combined with `Persistent=true`, systemd treats that as a missed run and
-  fires the service *immediately* on `systemctl enable --now`, not after the interval.
-  This created two unplanned real giveaways the first time
-  `fuzzworkbot-random-giveaway.timer` was set up. `fuzzworkbot-random-giveaway.timer`
-  now deliberately has no `OnBootSec=` — `OnUnitActiveSec=` alone waits the full
-  interval before its first run. Don't add `OnBootSec=` to a recurring timer like this
-  without a large value (hours+), and if you do, test with `systemctl list-timers`
-  *before* `enable --now`, not after.
+- **systemd timer gotchas** (both hit `fuzzworkbot-random-giveaway.timer`):
+  - A short `OnBootSec=` on a box with long uptime is already "elapsed" the instant the
+    timer is enabled; with `Persistent=true` systemd fires the service *immediately* on
+    `enable --now`. Created two unplanned real giveaways the first time.
+  - `OnUnitActiveSec=` counts from the service's last activation *in the current boot*.
+    After a reboot (2026-11-18) the service had never run, so `NextElapse` was infinity
+    and the timer silently never fired again. `Persistent=` doesn't help: it only
+    catches up `OnCalendar=` runs.
+  - So the timer is now `OnCalendar=hourly` + `Persistent=true`, and the service passes
+    `--only-if-idle` (no-op while the channel has a pending/active giveaway). Any extra
+    or catch-up run is harmless by construction. Keep that flag if you change the
+    schedule, and check `systemctl list-timers` shows a real NEXT after changes.
 - Cogs call `load_config()` again at module import time (in addition to `bot.py`
   calling it once to build the bot). This is intentional, not a mistake: disnake's
   `guild_ids=[...]` on `@commands.slash_command` needs a value at class-definition

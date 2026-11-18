@@ -176,6 +176,22 @@ def test_giveaway_random_rechecks_capacity_under_lock(run, session_factory, make
         assert len(session.scalars(select(Giveaway)).all()) == 1
 
 
+def test_giveaway_random_only_if_idle(run, session_factory, make_prize, make_giveaway):
+    prize_id = make_prize(name="PLEX", codes=["A", "B", "C"])
+    make_giveaway(prize_id, status=STATUS_ACTIVE, channel_id=42)
+    make_giveaway(prize_id, status=STATUS_FINISHED, channel_id=43)
+
+    result = run("giveaway", "random", "--only-if-idle", "--channel-id", "42")
+    assert "Nothing created" in result.output
+    with session_factory() as session:
+        assert len(session.scalars(select(Giveaway)).all()) == 2
+
+    # A finished giveaway doesn't count as running, so channel 43 gets a new one.
+    run("giveaway", "random", "--only-if-idle", "--channel-id", "43")
+    with session_factory() as session:
+        assert len(session.scalars(select(Giveaway).where(Giveaway.channel_id == 43)).all()) == 2
+
+
 def test_giveaway_winners(run, session_factory, make_prize, make_giveaway):
     from fuzzworkbot.db import GiveawayWinner, now_utc
 
